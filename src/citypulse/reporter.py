@@ -64,7 +64,7 @@ class Rates:
             out["ingest_rate"] = d["accepted"] / dt
             out["reject_pct"] = 100 * d["rejected"] / readings if readings else 0.0
             out["overloaded_pct"] = 100 * d["overloaded"] / batches if batches else 0.0
-        out["p95_ms"] = p95_ms()
+        out["latency_p95_ms"] = p95_ms()
         self.prev, self.at = cur, now
         return out
 
@@ -72,7 +72,10 @@ class Rates:
 def fleet_points(s: dict) -> list[dict]:
     total = s["total"] or 1
     c = s["counts"]
+    sized = [d["ok"] / d["total"] for d in s["districts"] if d["total"] >= 20]
+    worst = round(100 * min(sized), 2) if sized else round(100 * s["health"], 2)
     return [
+        {"name": "worst_district_pct", "value": worst},
         {"name": "fleet_health_pct", "value": round(100 * s["health"], 2)},
         {"name": "offline_pct", "value": round(100 * c["offline"] / total, 2)},
         {"name": "stale_pct", "value": round(100 * c["stale"] / total, 2)},

@@ -182,7 +182,9 @@ def test_a_refused_token_is_reported_not_hidden():
 
 
 def test_reporter_points_and_p95():
-    pts = reporter.fleet_points({"total": 100, "health": 0.9, "counts": {"ok": 90, "offline": 6, "stale": 2, "fault": 1, "stuck": 1}})
+    pts = reporter.fleet_points({"total": 100, "health": 0.9, "counts": {"ok": 90, "offline": 6, "stale": 2, "fault": 1, "stuck": 1},
+                                 "districts": [{"total": 50, "ok": 49}, {"total": 40, "ok": 10}, {"total": 10, "ok": 0}]})
     assert {p["name"]: p["value"] for p in pts} == {"fleet_health_pct": 90.0, "offline_pct": 6.0, "stale_pct": 2.0,
-                                                    "fault_pct": 1.0, "stuck_pct": 1.0}
+                                                    "fault_pct": 1.0, "stuck_pct": 1.0,
+                                                    "worst_district_pct": 25.0}   # districts under 20 sensors are ignored
     assert reporter.p95_ms() >= 0

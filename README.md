@@ -88,7 +88,7 @@ Pick one (or both; the Connect tab has copy-paste snippets):
    simulator's buffer.
 2. **CityPulse reports itself.** Set `PAGERLENS_URL` and `PAGERLENS_TOKEN` (an **ingest** token from PagerLens; also
    accepted as `PAGERLENS_TOKEN_FILE`). Every 15 s it pushes two services, `citypulse-ingest` (up, rate, reject %,
-   overloaded %, p95 ms) and `citypulse-fleet` (health, offline/stale/fault/stuck %; depends on the ingest service),
+   overloaded %, latency_p95_ms) and `citypulse-fleet` (health, offline/stale/fault/stuck %, worst district; depends on the ingest service),
    and raises a `SensorFleetDegraded` alert when the verdict worsens (repeated every 10 minutes while it lasts).
 
 ## Configuration
@@ -149,7 +149,6 @@ including a gzip bomb, and `/metrics`.
 * The OTLP receiver has been tested with synthetic payloads, not with a live OpenTelemetry SDK or Collector.
 * Rate limiting of failed sign-ins is in memory, per process.
 * Tokens are cached for 30 seconds per process, so a revoked token can still work briefly on other replicas.
-* PagerLens needs failure patterns for sensor fleets (ingest overload, regional outage, data-quality degradation) before
-  it can name these incidents' causes; until then it opens the incident and reports "unknown".
+* PagerLens diagnoses the three sensor-fleet patterns (ingest overload, sensor-fleet outage, bad data) from the metrics above; it does not see per-district detail beyond the worst-district share.
 
 Licensed under Apache-2.0. See [SECURITY.md](SECURITY.md).
