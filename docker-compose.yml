@@ -1,0 +1,28 @@
+# LOCAL DEVELOPMENT ONLY. Set POSTGRES_PASSWORD in your git-ignored .env (see .env.example).
+# The database is bound to 127.0.0.1.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: citypulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: citypulse
+    ports: ["127.0.0.1:5434:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U citypulse"]
+      interval: 3s
+      retries: 20
+  # One image, two roles. `all` runs the API and the simulator together (simplest); split them to scale.
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://citypulse:${POSTGRES_PASSWORD}@db:5432/citypulse
+      CITYPULSE_ROLE: all
+      SIM_SENSORS: "3000"
+      # First run prints a one-time setup code: see `docker compose logs api`.
+    ports: ["127.0.0.1:8002:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+volumes:
+  pgdata:

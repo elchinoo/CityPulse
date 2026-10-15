@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CityPulse</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="A smart-city sensor platform on Postgres: thousands of simulated sensors, an ingest gateway, a status engine and a burst button.">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#overview"><img src="/static/logo.svg" alt="" width="34" height="34"><span>CityPulse</span></a>
+  <nav id="nav" class="tabs" hidden>
+    <a href="#overview" data-tab="overview">Overview</a>
+    <a href="#sensors" data-tab="sensors">Sensors</a>
+    <a href="#burst" data-tab="burst">Burst</a>
+    <a href="#connect" data-tab="connect">Connect</a>
+    <a href="#settings" data-tab="settings">Settings</a>
+  </nav>
+  <button id="signout" class="ghost" type="button" hidden>Sign out</button>
+</header>
+
+<main class="wide">
+  <section id="auth-card" class="card narrow" hidden></section>
+  <section id="view-overview" hidden></section>
+  <section id="view-sensors" hidden></section>
+  <section id="view-burst" hidden></section>
+  <section id="view-connect" hidden></section>
+  <section id="view-settings" hidden></section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>
