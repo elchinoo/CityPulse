@@ -38,6 +38,16 @@ reported and the Overview shows the heatmap. Open **Burst** and press the red bu
 
 Without Docker: `pip install -e ".[dev]"`, export `DATABASE_URL`, run `citypulse start`.
 
+## Industrial protocols and the simulator
+
+CityPulse itself speaks HTTP: the push API, OTLP and `/metrics`. Field equipment that speaks **Modbus TCP, EtherNet/IP,
+EtherCAT, PROFINET or PROFIBUS** reaches it through an **edge gateway** that terminates those protocols and forwards readings
+over HTTPS, as a plant gateway does (and as a platform that only exposes HTTP requires). The companion project
+[CityPulse Simulator](https://github.com/elchinoo/CityPulseSimulator) is such a gateway plus the field devices behind it: you
+create cities of simulated sensors (27 types, any protocol, a range, a frequency and a burst percentage) and it sends their data
+here. Each reading may carry an optional `protocol` field (`http` by default, `otlp`, `direct`, `modbus_tcp`, `ethernet_ip`,
+`ethercat`, `profinet`, `profibus`); the Overview breaks sensor health down by it.
+
 ## What the status engine decides
 
 Per sensor, first match wins: **offline** (nothing for 12 reporting intervals), **stale** (3 intervals),

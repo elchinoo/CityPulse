@@ -101,7 +101,7 @@ def to_readings(data: dict) -> tuple[list[dict], int]:
                     if ts is not None and not (0 < ts < datetime.now(UTC).timestamp() + 120):
                         ts = None
                     item = {"sensor": str(sensor), "type": kind, "district": str(attrs.get("district") or "d00"),
-                            "value": value}
+                            "value": value, "protocol": "otlp"}
                     if ts:
                         item["ts"] = ts
                     items.append(item)

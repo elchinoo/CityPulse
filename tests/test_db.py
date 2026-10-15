@@ -82,6 +82,15 @@ def test_accept_stores_readings_and_keeps_latest_state():
         assert c.execute("SELECT last_value FROM sensor WHERE id='temperature-d01-0001'").fetchone()["last_value"] == 12.5
 
 
+def test_the_collection_protocol_is_recorded_and_summarised():
+    gateway.accept([reading(1, protocol="modbus_tcp"), reading(2, protocol="profibus"), reading(3, protocol="profibus"), reading(4)])
+    with connect() as c:
+        s = status.summary(c)
+        assert {p["key"]: p["total"] for p in s["protocols"]} == {"modbus_tcp": 1, "profibus": 2, "http": 1}
+        assert c.execute("SELECT protocol FROM sensor WHERE id='temperature-d01-0001'").fetchone()["protocol"] == "modbus_tcp"
+    assert gateway.accept([reading(5, protocol="smoke-signals")])["rejected"] == 1
+
+
 def test_sensor_cap_refuses_new_sensors_but_keeps_known_ones(monkeypatch):
     monkeypatch.setenv("MAX_SENSORS", "100")
     gateway.accept([reading(i) for i in range(100)])

@@ -68,6 +68,14 @@ function typeTable(s) {
       h("td", { class: "num" }, t.fault || ""), h("td", { class: "num" }, t.stuck || ""))))));
 }
 
+function protocolTable(s) {
+  if (!s.protocols || s.protocols.length < 2) return null;
+  return h("div", { class: "card flush" }, h("table", {},
+    h("thead", {}, h("tr", {}, ...["Collected through", "Sensors", "Health", ""].map((t) => h("th", {}, t)))),
+    h("tbody", {}, ...s.protocols.map((p) => h("tr", {}, h("td", { class: "title" }, p.label), h("td", { class: "num" }, p.total.toLocaleString()),
+      h("td", { class: "num" }, pct(p.ok / p.total)), h("td", {}, bar(p.ok / p.total)))))));
+}
+
 async function render(box) {
   let s, hist;
   try { [s, hist] = await Promise.all([api("/api/status"), api("/api/history?minutes=60")]); } catch (err) {
@@ -85,7 +93,8 @@ async function render(box) {
     fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, "No sensors have reported yet. The simulator starts on its own in the 'all' role; give it half a minute, or see Connect to send real readings.")));
     return;
   }
-  fill(box, burst, banner(s), kpis(s), heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s));
+  fill(box, burst, banner(s), kpis(s), heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
+    s.protocols && s.protocols.length > 1 ? h("h2", { class: "section-title" }, "By collection protocol") : null, protocolTable(s));
 }
 
 export async function initOverview() {

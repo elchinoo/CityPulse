@@ -25,6 +25,7 @@ INFO = Gauge("app_info", "Build information", ["app", "version"], registry=REGIS
 INFO.labels(APP, __version__).set(1)
 
 READINGS = Counter("citypulse_readings_total", "Readings by outcome", ["result"], registry=REGISTRY)
+BY_PROTOCOL = Counter("citypulse_readings_by_protocol_total", "Readings offered, by collection protocol", ["protocol"], registry=REGISTRY)
 BATCHES = Counter("citypulse_ingest_batches_total", "Ingest batches by outcome", ["result"], registry=REGISTRY)
 BATCH_SECONDS = Histogram("citypulse_ingest_batch_seconds", "Time to accept a batch", registry=REGISTRY,
                           buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10))

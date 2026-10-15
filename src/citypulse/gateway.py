@@ -18,6 +18,7 @@ from .config import get_settings
 from .db import connect, pool
 
 MAX_BATCH = 1000
+PROTOCOLS = {"http", "otlp", "direct", "modbus_tcp", "ethernet_ip", "ethercat", "profinet", "profibus"}
 MAX_AGE, MAX_FUTURE, LATE_AFTER = timedelta(hours=24), timedelta(minutes=2), timedelta(minutes=5)
 
 
@@ -82,8 +83,8 @@ def parse_ts(value, now: datetime) -> datetime:
     return min(ts, now)
 
 
-def validate(item, now: datetime) -> tuple[str, str, str, datetime, float] | str:
-    """A cleaned (sensor, type, district, ts, value) tuple, or the reason it was rejected."""
+def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str] | str:
+    """A cleaned (sensor, type, district, ts, value, protocol) tuple, or the reason it was rejected."""
     if not isinstance(item, dict):
         return "item is not an object"
     sensor, kind, district = item.get("sensor"), item.get("type"), item.get("district")
@@ -93,6 +94,9 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float] | str
         return "unknown sensor type"
     if not isinstance(district, str) or not DISTRICT_ID.match(district):
         return "bad district"
+    protocol = item.get("protocol", "http")
+    if protocol not in PROTOCOLS:
+        return "unknown protocol"
     value = item.get("value")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "value must be a number"
@@ -103,7 +107,7 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float] | str
         ts = parse_ts(item.get("ts"), now)
     except ValueError as exc:
         return str(exc)
-    return sensor, kind, district, ts, value
+    return sensor, kind, district, ts, value, protocol
 
 
 def accept(items: list) -> dict:
@@ -143,6 +147,8 @@ def accept(items: list) -> dict:
     accepted, rejected = len(good) - refused, rejected + refused
     late = sum(1 for g in good if now - g[3] > LATE_AFTER)
     metrics.READINGS.labels("accepted").inc(accepted)
+    for proto in {g[5] for g in good}:
+        metrics.BY_PROTOCOL.labels(proto).inc(sum(1 for g in good if g[5] == proto))
     if rejected:
         metrics.READINGS.labels("rejected").inc(rejected)
     if late:
@@ -179,13 +185,13 @@ def _store(good: list, errors: dict) -> int:
                     ([g[0] for g in good], [g[3] for g in good], [g[4] for g in good]))
                 rows = list(latest.values())
                 conn.execute(
-                    "INSERT INTO sensor (id, type, district, last_ts, last_value) "
-                    "SELECT * FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[]) "
+                    "INSERT INTO sensor (id, type, district, last_ts, last_value, protocol) "
+                    "SELECT * FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]) "
                     "ON CONFLICT (id) DO UPDATE SET "
                     " last_value = CASE WHEN EXCLUDED.last_ts >= sensor.last_ts THEN EXCLUDED.last_value ELSE sensor.last_value END, "
                     " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()",
                     ([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows],
-                     [r[3] for r in rows], [r[4] for r in rows]))
+                     [r[3] for r in rows], [r[4] for r in rows], [r[5] for r in rows]))
     except PoolTimeout as exc:
         raise Overloaded("database connections are exhausted") from exc
     return refused

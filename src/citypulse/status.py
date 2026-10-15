@@ -79,7 +79,7 @@ def _bucket(rows: list[dict], key: str, label) -> list[dict]:
 
 def summary(conn) -> dict:
     """Counts per status, per type, per district, the district x type matrix, and the overall verdict."""
-    rows = conn.execute("SELECT district, type, status, count(*) AS n FROM sensor GROUP BY 1,2,3").fetchall()
+    rows = conn.execute("SELECT district, type, protocol, status, count(*) AS n FROM sensor GROUP BY 1,2,3,4").fetchall()
     counts = {s: 0 for s in STATUSES}
     matrix: dict[tuple, dict] = {}
     for r in rows:
@@ -91,6 +91,7 @@ def summary(conn) -> dict:
     health = counts["ok"] / total if total else 1.0
     by_type = _bucket(rows, "type", lambda k: TYPES[k].label if k in TYPES else k)
     by_district = _bucket(rows, "district", lambda k: DISTRICTS.get(k, k))
+    by_protocol = _bucket(rows, "protocol", lambda k: k.replace("_", " "))
     overall = tier(health) if total else "operational"
     reasons = []
     for d in by_district:
@@ -103,7 +104,7 @@ def summary(conn) -> dict:
     if total and health < 0.97:
         reasons.insert(0, f"fleet is {round(100 * health, 1)}% healthy ({total - counts['ok']} of {total} sensors have a problem)")
     return {"state": overall, "health": health, "total": total, "counts": counts, "types": by_type,
-            "districts": by_district, "matrix": list(matrix.values()), "reasons": reasons[:8]}
+            "districts": by_district, "protocols": by_protocol, "matrix": list(matrix.values()), "reasons": reasons[:8]}
 
 
 def history(conn, minutes: int) -> list[dict]:

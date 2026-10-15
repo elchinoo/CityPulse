@@ -44,6 +44,7 @@ GOOD = {"sensor": "temp-d01-0001", "type": "temperature", "district": "d01", "va
     ({"value": float("inf")}, "value out of range"),
     ({"value": 1e13}, "value out of range"),
     ({"ts": "yesterday-ish"}, "bad timestamp"),
+    ({"protocol": "zigbee"}, "unknown protocol"),
     ({"ts": time.time() + 3600}, "timestamp in the future"),
     ({"ts": time.time() - 3 * 86400}, "timestamp older than 24 hours"),
 ])
@@ -53,8 +54,8 @@ def test_validate_rejects_with_a_reason(patch, reason):
 
 def test_validate_accepts_and_normalises():
     now = datetime.now(UTC)
-    sensor, kind, district, ts, value = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
-    assert (sensor, kind, district, value) == ("temp-d01-0001", "temperature", "d01", 21.5)
+    sensor, kind, district, ts, value, protocol = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
+    assert (sensor, kind, district, value, protocol) == ("temp-d01-0001", "temperature", "d01", 21.5, "http")
     assert 3 < (now - ts).total_seconds() < 9            # milliseconds epoch understood
     assert gateway.validate("not a dict", NOW) == "item is not an object"
     # a value past the physical limits is VALID input (it becomes a fault later), not a rejection

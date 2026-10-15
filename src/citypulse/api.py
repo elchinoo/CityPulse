@@ -490,7 +490,7 @@ def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|o
     if q:
         where.append("position(%s in id) > 0")
         args.append(q.lower())
-    sql = ("SELECT id, type, district, status, reason, last_ts, last_value, status_since FROM sensor"
+    sql = ("SELECT id, type, district, protocol, status, reason, last_ts, last_value, status_since FROM sensor"
            + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY status_since DESC LIMIT %s")
     with connect() as conn:
         return conn.execute(sql, [*args, limit]).fetchall()
