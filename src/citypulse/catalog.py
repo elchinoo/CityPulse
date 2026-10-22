@@ -13,6 +13,14 @@ DISTRICTS: dict[str, str] = {
     "d09": "Green Valley", "d10": "Eastside", "d11": "Market District", "d12": "Southfield",
 }
 
+
+def district_name(district_id: str) -> str:
+    """Display name of a district id. The built-in simulator's legacy ids (d01..d12) keep their catalogue name; any other
+    id (a city may name its districts freely: `alder-quay`) is prettified: separators become spaces, each word capitalised."""
+    known = DISTRICTS.get(district_id)
+    return known or " ".join(w.capitalize() for w in district_id.replace("-", " ").replace("_", " ").split()) or district_id
+
+
 SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 DISTRICT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
 CITY_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")

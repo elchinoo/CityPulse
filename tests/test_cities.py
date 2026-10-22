@@ -10,7 +10,8 @@ if not os.environ.get("TEST_DATABASE_URL"):
 
 from test_db import H, _db, login, otlp_payload, reading, token  # noqa: E402,F401  (the autouse _db fixture resets the schema)
 
-from citypulse import chaos, core, gateway, migrate, purge, reporter, status  # noqa: E402
+from citypulse import chaos, core, gateway, metrics, migrate, purge, reporter, status  # noqa: E402
+from citypulse.catalog import DISTRICTS  # noqa: E402
 from citypulse.db import connect  # noqa: E402
 
 
@@ -572,3 +573,99 @@ def test_reporter_snapshot_reads_real_cities():
     with connect() as c:
         info = status.problem_cities(c)
     assert info == {"count": 4, "problems": ["paris"]}
+
+
+# ---- districts are whatever the sensors report -----------------------------------------------------
+def named_fleet():
+    """Two cities with districts of their own: nothing shared, nothing from the catalogue (except one legacy id in rome)."""
+    items = [reading(i, district=d, city="oslo") | {"sensor": f"oslo.t{d}{i:03d}"} for d, n in (("alder-quay", 5), ("north-mill", 2)) for i in range(n)]
+    items += [reading(i, district=d, city="rome") | {"sensor": f"rome.t{d}{i:03d}"} for d, n in (("d01", 3), ("via_nova", 1)) for i in range(n)]
+    assert gateway.accept(items)["rejected"] == 0
+    with connect() as c:
+        c.execute("UPDATE sensor SET status='fault' WHERE id LIKE 'oslo.talder-quay00%' AND id < 'oslo.talder-quay002'")
+        c.commit()
+
+
+def test_districts_endpoint_lists_what_the_city_reports(client):
+    login(client)
+    named_fleet()
+    o = client.get("/api/cities/oslo/districts").json()
+    assert o["city"] == "oslo" and o["total"] == 2 and o["limit"] == 200
+    assert [(d["id"], d["name"], d["total"]) for d in o["districts"]] == [("alder-quay", "Alder Quay", 5), ("north-mill", "North Mill", 2)]
+    aq = o["districts"][0]
+    assert aq["worst_status"] == "fault" and aq["counts"]["fault"] == 2 and aq["counts"]["ok"] == 3 and aq["health"] == 0.6
+    assert o["districts"][1]["worst_status"] == "ok" and o["districts"][1]["health"] == 1.0
+    r = client.get("/api/cities/rome/districts").json()
+    assert [(d["id"], d["name"]) for d in r["districts"]] == [("d01", "Harbor"), ("via_nova", "Via Nova")]   # legacy keeps its catalogue name
+    assert client.get("/api/cities/nowhere/districts").status_code == 404
+    assert client.get("/api/cities/Bad_City/districts").status_code == 422
+    client.cookies.clear()
+    assert client.get("/api/cities/oslo/districts").status_code in (401, 403)
+
+
+def test_districts_endpoint_is_bounded_with_a_total():
+    items = [reading(1, district=f"dist-{i:03d}", city="big") | {"sensor": f"big.t{i:04d}"} for i in range(230)]
+    items += [reading(2, district="dist-007", city="big") | {"sensor": f"big.extra{i}"} for i in range(3)]
+    assert gateway.accept(items)["rejected"] == 0
+    with connect() as c:
+        out = status.districts(c, "big")
+        assert out["total"] == 230 and len(out["districts"]) == 200 and out["districts"][0]["id"] == "dist-007"   # biggest first
+        assert len(status.districts(c, "big", 5)["districts"]) == 5
+        s = status.summary(c, "big")                                    # the overview is bounded the same way
+        assert s["districts_total"] == 230 and len(s["districts"]) == 200
+        assert {m["district"] for m in s["matrix"]} <= {d["key"] for d in s["districts"]}
+        assert [d["label"] for d in s["districts"]][0] == "Dist 000"
+
+
+def test_status_matrix_and_labels_use_the_real_districts(client):
+    login(client)
+    named_fleet()
+    s = client.get("/api/status?city=oslo").json()
+    assert [(d["key"], d["label"]) for d in s["districts"]] == [("alder-quay", "Alder Quay"), ("north-mill", "North Mill")]
+    assert {m["district"] for m in s["matrix"]} == {"alder-quay", "north-mill"} and s["districts_total"] == 2
+    g = client.get("/api/status").json()                                # a district id can only exist in one city, or in many
+    assert {d["key"] for d in g["districts"]} == {"alder-quay", "north-mill", "d01", "via_nova"}
+    assert [r["district"] for r in client.get("/api/sensors?state=all&city=oslo&district=north-mill").json()] == ["north-mill"] * 2
+    assert client.get("/api/sensors?district=Bad%20Id").status_code == 422
+    assert "d12" in {d["id"] for d in client.get("/api/catalog").json()["districts"]}     # the built-in simulator keeps the catalogue
+
+
+def test_burst_accepts_any_district_that_has_reported(client):
+    login(client)
+    named_fleet()
+    ok = lambda body: client.post("/api/chaos", json={"kind": "noise", **body}, headers=H).status_code   # noqa: E731
+    assert ok({"target": "district:alder-quay", "city": "oslo"}) == 200
+    assert ok({"target": "district:alder-quay"}) == 200                  # without a city: reported anywhere
+    assert ok({"target": "district:via_nova"}) == 200
+    assert ok({"target": "district:never-seen"}) == 422                  # valid id, but nobody reports it
+    assert ok({"target": "district:never-seen", "city": "oslo"}) == 422
+    assert ok({"target": "district:via_nova", "city": "oslo"}) == 422    # reports in rome, not in the selected city
+    assert ok({"target": "district:Bad Id"}) == 422
+    assert ok({"target": "district:d07"}) == 200                         # a catalogue id is always accepted (the built-in simulator)
+    assert ok({"target": "district:d07", "city": "oslo"}) == 422         # ... unless a city is named and it does not report there
+
+
+def test_a_district_burst_hits_only_that_district_in_any_city():
+    b = chaos.Burst("dropout", "district:alder-quay", 5)
+    assert b.matches("rain", "alder-quay", "oslo") and not b.matches("rain", "north-mill", "oslo")
+
+
+def test_storm_darkens_a_district_that_exists():
+    named_fleet()
+    with connect() as c:
+        ids = chaos.storm(c, 60)
+        dark = c.execute("SELECT target FROM chaos WHERE kind='dropout' AND id = ANY(%s)", (ids,)).fetchone()["target"]
+        assert dark.removeprefix("district:") in {"alder-quay", "north-mill", "d01", "via_nova"}
+        ids = chaos.storm(c, 60, city="oslo")
+        assert c.execute("SELECT target FROM chaos WHERE kind='dropout' AND id = ANY(%s)", (ids,)).fetchone()["target"] == "city:oslo"
+        assert chaos._districts(c, "oslo") == ["alder-quay", "north-mill"]
+    with connect() as c:
+        c.execute("DELETE FROM sensor")
+        c.commit()
+        assert set(chaos._districts(c, None)) == set(DISTRICTS)   # nothing reports: the catalogue
+
+
+def test_the_metrics_label_districts_by_id():
+    named_fleet()
+    labels = {x.labels["district"] for f in metrics.FleetCollector().collect() if f.name == "citypulse_district_health_ratio" for x in f.samples}
+    assert labels == {"alder-quay", "north-mill", "d01", "via_nova"}

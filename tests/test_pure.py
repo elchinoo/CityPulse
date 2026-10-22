@@ -76,9 +76,18 @@ def test_burst_targets_and_validation():
     assert b.matches("rain", "d03") and not b.matches("rain", "d04")
     assert chaos.Burst("noise", "type:rain", 1).matches("rain", "d09")
     assert chaos.Burst("noise", "all", 1).matches("co2", "d01")
-    for bad in ("district:nope", "type:nope", "everything", "district:"):
+    for bad in ("district:Bad Id", "district:-x", "district:" + "a" * 25, "type:nope", "everything", "district:"):
         with pytest.raises(chaos.ChaosError):
             chaos.check_target(bad)
+    for good in ("district:alder-quay", "district:north_mill", "district:d01", "district:9"):
+        assert chaos.check_target(good) == good          # districts are free-form ids, not a fixed catalogue
+
+
+def test_district_display_names():
+    from citypulse.catalog import DISTRICTS, district_name
+    assert district_name("d01") == "Harbor" and all(district_name(k) == v for k, v in DISTRICTS.items())   # legacy ids keep their name
+    assert district_name("alder-quay") == "Alder Quay" and district_name("north_mill") == "North Mill"
+    assert district_name("x") == "X" and district_name("d00") == "D00" and district_name("a--b__c") == "A B C"
 
 
 class _Sink:

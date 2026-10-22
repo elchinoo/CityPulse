@@ -1,5 +1,6 @@
 import { api } from "/kit/api.js";
 import { currentCity, withCity } from "/static/cities.js";
+import { loadDistricts } from "/static/districts.js";
 import { $, field, fill, h } from "/kit/ui.js";
 
 let catalog = null;
@@ -27,9 +28,14 @@ function spark(readings) {
   return svg;
 }
 
-async function showDetail(box, id, back) {
+// The detail replaces the list in its own region; the filters and the list stay in the page (hidden), so coming back keeps
+// what was typed and chosen instead of redrawing the form from scratch.
+async function showDetail(detail, listView, id) {
   const s = await api(`/api/sensors/${encodeURIComponent(id)}`);
-  fill(box, h("button", { class: "ghost", type: "button", onclick: back }, "← back to the list"),
+  const back = () => { fill(detail); detail.hidden = true; listView.hidden = false; };
+  listView.hidden = true;
+  detail.hidden = false;
+  fill(detail, h("button", { class: "ghost", type: "button", onclick: back }, "← back to the list"),
     h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { class: "section-title" }, s.id), h("span", { class: `st ${s.status}` }, s.status)),
       h("dl", { class: "facts" }, h("dt", {}, "Type"), h("dd", {}, s.type), h("dt", {}, "City"), h("dd", {}, s.city), h("dt", {}, "District"), h("dd", {}, s.district), h("dt", {}, "Protocol"), h("dd", {}, (s.protocol || "").replace("_", " ")),
         h("dt", {}, "Last value"), h("dd", {}, String(s.last_value)), h("dt", {}, "Last reading"), h("dd", {}, ago(s.last_ts)),
@@ -45,10 +51,18 @@ export async function initSensors(arg = []) {
   const [district, type] = arg;
   const stateSel = h("select", { id: "f-state" }, ...[["problem", "Problems only"], ["all", "All sensors"], ["ok", "Healthy"], ["stale", "Stale"], ["offline", "Offline"], ["fault", "Fault"], ["stuck", "Stuck"]].map(([v, t]) => h("option", { value: v }, t)));
   const typeSel = h("select", { id: "f-type" }, h("option", { value: "" }, "Any type"), ...catalog.types.map((t) => h("option", { value: t.key }, t.label)));
-  const distSel = h("select", { id: "f-district" }, h("option", { value: "" }, "Any district"), ...catalog.districts.map((d) => h("option", { value: d.id }, d.name)));
+  const distSel = h("select", { id: "f-district" }, h("option", { value: "" }, "Any district"));
+  const fillDistricts = async () => {                            // the districts that report in the chosen city, not a fixed list
+    let found = { list: [], total: 0 };
+    try { found = await loadDistricts(currentCity()); } catch { /* "Any district" and a typed link still work */ }
+    const want = distSel.value || (district && district !== "-" ? district : "");
+    const opts = found.list.map((d) => h("option", { value: d.id }, d.name));
+    if (want && !found.list.some((d) => d.id === want)) opts.push(h("option", { value: want }, want));
+    distSel.replaceChildren(h("option", { value: "" }, found.total > found.list.length ? `Any district (${found.list.length} biggest of ${found.total.toLocaleString()} listed)` : "Any district"), ...opts);
+    distSel.value = want;
+  };
   const q = h("input", { id: "f-q", placeholder: "sensor id contains…", maxlength: "64" });
   if (type && type !== "-") { typeSel.value = type; stateSel.value = "all"; }
-  if (district && district !== "-") distSel.value = district;
   const out = h("div", { class: "card flush" });
   const draw = async () => {
     const p = new URLSearchParams({ state: stateSel.value, limit: "200" });
@@ -58,7 +72,7 @@ export async function initSensors(arg = []) {
     try {
       const rows = await api(withCity(`/api/sensors?${p}`));
       fill(out, rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["Sensor", "City", "Type", "District", "Protocol", "State", "Last value", "Last reading", "Why"].map((t) => h("th", {}, t)))),
-        h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", onclick: () => showDetail(box, r.id, () => initSensors(arg)) },
+        h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", onclick: () => showDetail(detail, listView, r.id) },
           h("td", {}, h("code", {}, r.id)), h("td", {}, r.city), h("td", {}, r.type), h("td", {}, r.district), h("td", {}, (r.protocol || "").replace("_", " ")), h("td", {}, h("span", { class: `st ${r.status}` }, r.status)),
           h("td", { class: "num" }, String(r.last_value)), h("td", {}, ago(r.last_ts)), h("td", { class: "muted" }, r.reason || ""))))) :
         h("p", { class: "empty" }, stateSel.value === "problem" ? "No sensor has a problem right now." : "No sensors match."));
@@ -67,6 +81,9 @@ export async function initSensors(arg = []) {
   for (const c of [stateSel, typeSel, distSel]) c.addEventListener("change", draw);
   let t;
   q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(draw, 250); });
-  fill(box, h("h1", {}, "Sensors", currentCity() ? h("small", { class: "scope-chip" }, ` · ${currentCity()}`) : null), h("div", { class: "card" }, h("div", { class: "grid3" }, field("State", stateSel), field("Type", typeSel), field("District", distSel)), field("Search", q)), out);
+  const detail = h("div", { hidden: true });
+  const listView = h("div", {}, h("div", { class: "card" }, h("div", { class: "grid3" }, field("State", stateSel), field("Type", typeSel), field("District", distSel)), field("Search", q)), out);
+  fill(box, h("h1", {}, "Sensors", currentCity() ? h("small", { class: "scope-chip" }, ` · ${currentCity()}`) : null), listView, detail);
+  await fillDistricts();
   draw();
 }

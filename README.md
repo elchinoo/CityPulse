@@ -18,7 +18,7 @@ It is a sample project: small enough to read in an afternoon, built to be extend
 
 * **One image, two roles.** `CITYPULSE_ROLE=api` serves the gateway, dashboard and status engine; `sim` runs only
   the simulator; `all` (default) runs both in one process; both of those need `CITYPULSE_CITY` (see below).
-* **27 sensor types** across 12 districts: rain, light, humidity, temperature, traffic cameras, traffic lights and
+* **27 sensor types** across the 12 districts of the built-in simulator (real senders name their districts freely, see **Districts**): rain, light, humidity, temperature, traffic cameras, traffic lights and
   speed radars, plus wind, pressure, UV, air quality, CO₂, noise, soil moisture, water level/flow/pressure, power
   meters, street lights, gas leaks, waste bins, bridge vibration, seismic, pedestrians, bike-share, EV chargers and
   parking bays. See `src/citypulse/catalog.py`.
@@ -82,8 +82,16 @@ simulator prefixes them with the city).
 * **Pick it:** the dashboard has a searchable **City** menu (remembered in the browser). It never lists thousands of
   options: it asks the server for the first 12 matches (least healthy first, or by prefix as you type). It filters the
   Overview, Sensors and Burst tabs; with all cities shown, the Overview lists the least healthy few.
+* **Districts are whatever the sensors report.** A district id is any `[a-z0-9][a-z0-9_-]{0,23}` (`alder-quay`, `north-mill`);
+  nothing assumes 12 districts or that two cities share any. `GET /api/cities/<id>/districts` lists those of one city, biggest
+  first, at most 200, with `total` for all: `{city, limit, total, districts:[{id, name, total, counts, health, worst_status}]}`
+  (404 if the city has no sensors). `name` is the id prettified (`alder-quay` becomes "Alder Quay"); the legacy `d01`..`d12`
+  keep their catalogue names. `/api/status` returns the 200 biggest districts (`districts_total` says how many exist) and the
+  matrix for those; `/api/catalog` `districts` is only the built-in simulator's. The Overview matrix, the Sensors district
+  filter and the Burst target menu are built from the data.
 * **Burst it:** a burst target may be `city:<id>` next to `all`, `district:<id>` and `type:<key>` (the city must have
-  reported); `POST /api/chaos/storm` takes an optional `{"city": "<id>"}`. Existing targets span every city.
+  reported; so must a district, except the built-in catalogue ids; `POST /api/chaos` takes an optional `"city"` that a district
+  target must have reported in); `POST /api/chaos/storm` takes an optional `{"city": "<id>"}`. Existing targets span every city.
 * **History per city:** the status engine records a health series per city every 30 s: for all cities while there are at
   most 200, otherwise for the 200 least healthy that have a problem (a city not tracked simply has no series, so its chart
   shows "collecting data"). The throughput chart of a city is computed from its readings.

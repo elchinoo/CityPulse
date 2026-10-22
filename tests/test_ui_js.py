@@ -1,4 +1,4 @@
-"""The dashboard's JavaScript: syntax, no HTML injection, and the delete-city confirmation against a fake DOM (needs node)."""
+"""The dashboard's JavaScript: syntax, no HTML injection, the delete-city confirmation and the refresh behaviour against a fake DOM (needs node)."""
 import os
 import re
 import shutil
@@ -32,6 +32,14 @@ def test_scripts_never_inject_html(script):
 def test_delete_city_confirmation_in_a_fake_dom():
     env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
     r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "delete_city.mjs")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
+def test_pages_keep_what_is_typed_when_they_refresh():
+    """Overview (delete-city confirmation), Burst, Sensors, City picker and Settings keep their inputs, values and focus across a refresh."""
+    env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
+    r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "refresh_typing.mjs")],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
 

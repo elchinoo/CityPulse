@@ -3,7 +3,7 @@ import random
 import time
 from dataclasses import dataclass
 
-from .catalog import CITY_ID, DISTRICTS, TYPES
+from .catalog import CITY_ID, DISTRICT_ID, DISTRICTS, TYPES
 
 KINDS = {
     "flood": "Sensors report many times more often: stresses the ingest gateway.",
@@ -40,15 +40,23 @@ def check_target(target: str) -> str:
     if target == "all":
         return target
     scope, _, key = target.partition(":")
-    if (scope == "district" and key in DISTRICTS) or (scope == "type" and key in TYPES) or (scope == "city" and CITY_ID.match(key)):
+    if (scope == "district" and DISTRICT_ID.match(key)) or (scope == "type" and key in TYPES) or (scope == "city" and CITY_ID.match(key)):
         return target
     raise ChaosError("target must be 'all', 'district:<id>', 'type:<key>' or 'city:<id>' with a valid id")
 
 
-def start(conn, kind: str, target: str = "all", intensity: int = 3, seconds: int = 120) -> int:
+def start(conn, kind: str, target: str = "all", intensity: int = 3, seconds: int = 120, city: str | None = None) -> int:
+    """`city` (optional) only checks a district target: the district must have reported in that city."""
     if kind not in KINDS:
         raise ChaosError(f"unknown burst kind {kind!r}")
     target = check_target(target)
+    if target.startswith("district:"):
+        key = target[9:]
+        if city and not conn.execute("SELECT 1 FROM sensor WHERE city = %s AND district = %s LIMIT 1", (city, key)).fetchone():
+            raise ChaosError(f"no sensor reports for district {key!r} in city {city!r}")
+        # Districts are whatever the senders name them; the built-in catalogue ids are always accepted, any other must have reported.
+        if not city and key not in DISTRICTS and not conn.execute("SELECT 1 FROM sensor WHERE district = %s LIMIT 1", (key,)).fetchone():
+            raise ChaosError(f"no sensor reports for district {key!r}")
     if target.startswith("city:") and not conn.execute("SELECT 1 FROM sensor WHERE city = %s LIMIT 1", (target[5:],)).fetchone():
         raise ChaosError(f"no sensor reports for city {target[5:]!r}")
     if not 1 <= intensity <= 5:
@@ -65,11 +73,17 @@ def start(conn, kind: str, target: str = "all", intensity: int = 3, seconds: int
     return row["id"]
 
 
+def _districts(conn, city: str | None) -> list[str]:
+    """Districts to pick the dark one from: those that report (in `city` if given), else the catalogue's."""
+    rows = conn.execute("SELECT DISTINCT district FROM sensor WHERE (%s::text IS NULL OR city = %s) ORDER BY district LIMIT 200", (city, city)).fetchall()
+    return [r["district"] for r in rows] or list(DISTRICTS)
+
+
 def storm(conn, seconds: int = 180, rng: random.Random | None = None, city: str | None = None) -> list[int]:
     """The big red button: several faults at once, so the platform has a real bad day.
     With `city`, the faults (and the dark district) are confined to that city's sensors; slow_db stays gateway-wide."""
     rng = rng or random.Random()
-    hit = rng.choice(list(DISTRICTS))
+    hit = rng.choice(_districts(conn, city))
     scope = f"city:{city}" if city else "all"
     plan = [("flood", scope, 3), ("slow_db", "all", 3), ("corrupt", scope, 2), ("noise", scope, 2),
             ("dropout", scope if city else f"district:{hit}", 5), ("stuck", scope, 2), ("late", scope, 2)]

@@ -17,7 +17,7 @@ import time
 import psycopg
 
 from . import chaos
-from .catalog import DISTRICTS, LEGACY_CITY, TYPES
+from .catalog import LEGACY_CITY, TYPES, district_name
 from .config import get_settings
 from .db import connect
 
@@ -78,6 +78,9 @@ def _bucket(rows: list[dict], key: str, label) -> list[dict]:
     return sorted(out.values(), key=lambda o: o["key"])
 
 
+DISTRICT_LIMIT = 200       # districts listed at once (by sensor count); a city may name its districts freely
+
+
 def summary(conn, city: str | None = None) -> dict:
     """Counts per status, per type, per district, the district x type matrix, and the overall verdict
     (of one city when `city` is given, of the whole fleet otherwise)."""
@@ -93,7 +96,7 @@ def summary(conn, city: str | None = None) -> dict:
     total = sum(counts.values())
     health = counts["ok"] / total if total else 1.0
     by_type = _bucket(rows, "type", lambda k: TYPES[k].label if k in TYPES else k)
-    by_district = _bucket(rows, "district", lambda k: DISTRICTS.get(k, k))
+    by_district = _bucket(rows, "district", district_name)
     by_protocol = _bucket(rows, "protocol", lambda k: k.replace("_", " "))
     overall = tier(health) if total else "operational"
     reasons = []
@@ -106,8 +109,27 @@ def summary(conn, city: str | None = None) -> dict:
             reasons.append(f"{t['label']}: {round(100 * t['ok'] / t['total'])}% healthy")
     if total and health < 0.97:
         reasons.insert(0, f"fleet is {round(100 * health, 1)}% healthy ({total - counts['ok']} of {total} sensors have a problem)")
+    # Districts are whatever the sensors report: bounded for the page, the matrix and the metrics (the verdict above used all of them).
+    shown = sorted(by_district, key=lambda d: (-d["total"], d["key"]))[:DISTRICT_LIMIT]
+    keep = {d["key"] for d in shown}
     return {"city": city, "legacy": city == LEGACY_CITY, "state": overall, "health": health, "total": total, "counts": counts, "types": by_type,
-            "districts": by_district, "protocols": by_protocol, "matrix": list(matrix.values()), "reasons": reasons[:8]}
+            "districts": sorted(shown, key=lambda d: d["key"]), "districts_total": len(by_district), "protocols": by_protocol,
+            "matrix": [m for m in matrix.values() if m["district"] in keep], "reasons": reasons[:8]}
+
+
+def districts(conn, city: str, limit: int = DISTRICT_LIMIT) -> dict:
+    """The districts that actually report in `city`, biggest first (at most `limit`), each with its display name, sensor counts
+    per status, health and worst sensor status. `total` counts all of the city's districts, listed or not."""
+    rows = conn.execute(
+        "SELECT *, count(*) OVER () AS n_districts FROM (SELECT district, count(*) AS total, "
+        + ", ".join(f"count(*) FILTER (WHERE status = '{k}') AS {k}" for k in STATUSES)
+        + " FROM sensor WHERE city = %s GROUP BY district) g ORDER BY total DESC, district LIMIT %s", (city, limit)).fetchall()
+    out = []
+    for r in rows:
+        ratio = r["ok"] / r["total"]
+        out.append({"id": r["district"], "name": district_name(r["district"]), "total": r["total"], "counts": {k: r[k] for k in STATUSES},
+                    "health": ratio, "worst_status": next((k for k in SEVERITY_ORDER if r[k]), "ok")})
+    return {"city": city, "limit": limit, "total": rows[0]["n_districts"] if rows else 0, "districts": out}
 
 
 def history(conn, minutes: int, city: str | None = None) -> list[dict]:

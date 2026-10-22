@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, chaos, core, gateway, metrics, otlp, purge, reporter, sim, status
-from .catalog import CITY_ID, DISTRICTS, GROUPS, TYPES
+from .catalog import CITY_ID, DISTRICT_ID, DISTRICTS, GROUPS, TYPES
 from .config import get_settings
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
 from .db import connect
@@ -383,6 +383,7 @@ async def otlp_metrics(request: Request):
 @app.get("/api/catalog", dependencies=[Depends(require("city:read"))])
 def catalog():
     return {
+        # The built-in simulator's districts only. Real districts are whatever the sensors report: GET /api/cities/{city}/districts.
         "districts": [{"id": k, "name": v} for k, v in DISTRICTS.items()],
         "groups": GROUPS,
         "types": [{"key": t.key, "label": t.label, "unit": t.unit, "group": t.group, "interval": t.interval,
@@ -423,6 +424,21 @@ def list_cities(q: str = Query("", max_length=32, pattern=r"^[A-Za-z0-9_-]*$"), 
         raise _db_unavailable() from exc
 
 
+@app.get("/api/cities/{city_id}/districts", dependencies=[Depends(require("city:read"))])
+def city_districts(city_id: str = PathParam(max_length=32, pattern=CITY_PATTERN)):
+    """The districts that report in this city (ids are free-form: `alder-quay`), biggest first, at most 200, with `total` for all
+    of them. Each has `id`, display `name`, `total` sensors, `counts` per status, `health` and `worst_status`. 404 if the city has no sensors."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            out = status.districts(conn, city_id)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+    if not out["total"]:
+        raise HTTPException(404, f"no sensor reports for city {city_id!r}")
+    return out
+
+
 @app.delete("/api/cities/{city_id}", dependencies=[Depends(require("city:delete"))])
 def delete_city(city_id: str = PathParam(max_length=32, pattern=CITY_PATTERN)):
     """Admin only. Irreversibly deletes the city with its sensors, readings, status history and burst targets, in batches of
@@ -446,7 +462,7 @@ _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 
 @app.get("/api/sensors", dependencies=[Depends(require("city:read"))])
 def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"),
-                 type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24),
+                 type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24, pattern=DISTRICT_ID.pattern),
                  city: str | None = CityParam,
                  q: str | None = Query(None, max_length=64), limit: int = Query(100, ge=1, le=500)):
     _api_role()
@@ -497,6 +513,7 @@ class BurstBody(BaseModel):
     target: str = Field(default="all", max_length=40)
     intensity: int = Field(default=3, ge=1, le=5)
     seconds: int = Field(default=120, ge=5, le=chaos.MAX_SECONDS)
+    city: str | None = Field(default=None, max_length=32, pattern=CITY_PATTERN)   # a district target must have reported in this city
 
 
 class StormBody(BaseModel):
@@ -516,7 +533,7 @@ def post_chaos(body: BurstBody):
     _api_role()
     try:
         with connect() as conn:
-            return {"id": chaos.start(conn, body.kind, body.target, body.intensity, body.seconds)}
+            return {"id": chaos.start(conn, body.kind, body.target, body.intensity, body.seconds, body.city)}
     except chaos.ChaosError as exc:
         raise HTTPException(422, str(exc)) from exc
 

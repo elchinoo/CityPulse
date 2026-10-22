@@ -2,6 +2,7 @@ import { api } from "/kit/api.js";
 import { lineChart } from "/static/charts.js";
 import { currentCity, setCity, withCity } from "/static/cities.js";
 import { deleteCityControl, LEGACY_TEXT } from "/static/citydelete.js";
+import { prettyDistrict } from "/static/districts.js";
 import { can } from "/kit/session.js";
 import { $, fill, h } from "/kit/ui.js";
 
@@ -44,7 +45,9 @@ function heatmap(s) {
   const cell = new Map(s.matrix.map((m) => [`${m.district}|${m.type}`, m]));
   const present = new Set(s.matrix.map((m) => m.type));
   const types = catalog.types.filter((t) => present.has(t.key));
-  const rows = catalog.districts.filter((d) => s.matrix.some((m) => m.district === d.id));
+  const names = new Map(s.districts.map((d) => [d.key, d.label]));
+  const present_d = new Set(s.matrix.map((m) => m.district));
+  const rows = [...present_d].sort().map((id) => ({ id, name: names.get(id) || prettyDistrict(id) }));
   const head = h("tr", {}, h("th", {}), ...types.map((t) => h("th", { class: "type", title: `${t.label} (${t.unit})` }, h("span", {}, t.label))));
   const body = rows.map((d) => h("tr", {}, h("th", { class: "row", scope: "row" }, d.name),
     ...types.map((t) => {
@@ -57,7 +60,7 @@ function heatmap(s) {
   const legend = h("div", { class: "legend" }, "Health:", ...["h0", "h1", "h2", "h3", "h4"].map((c, i) =>
     h("span", {}, h("i", { class: `heat-key ${c}` }), ["<50%", "50–75%", "75–90%", "90–98%", "≥98%"][i])));
   return h("div", { class: "card heat" }, h("div", { class: "row" }, h("h2", { class: "section-title" }, "Districts × sensor types"),
-    h("span", { class: "muted" }, "click a cell to list its sensors")),
+    h("span", { class: "muted" }, s.districts_total > s.districts.length ? `the ${s.districts.length} biggest of ${s.districts_total.toLocaleString()} districts; click a cell to list its sensors` : "click a cell to list its sensors")),
   h("table", {}, h("thead", {}, head), h("tbody", {}, ...body)), legend);
 }
 
@@ -80,12 +83,12 @@ function protocolTable(s) {
 }
 
 // A deployment upgraded from before cities were mandatory may still hold sensors in the retired city. Say so, and offer the way out.
+// The delete control is not part of it: it lives in the actions region, which a refresh never redraws.
 function legacyNotice(id, scoped) {
-  const del = can("city:delete") && scoped ? deleteCityControl(id, { onDone: () => setCity("") }) : null;
   return h("div", { class: "banner warn legacy-banner" }, h("strong", {}, `City ${id}: ${LEGACY_TEXT}. `),
     "These sensors were stored before every reading had to name its city; nothing creates this city any more, and it is never removed automatically. ",
     scoped ? (can("city:delete") ? "Delete it once you no longer need this data." : "Ask an administrator to delete it once the data is no longer needed.")
-      : h("button", { class: "secondary small", type: "button", onclick: () => setCity(id) }, "Open it"), del);
+      : h("button", { class: "secondary small", type: "button", onclick: () => setCity(id) }, "Open it"));
 }
 
 // With several cities, the least healthy few (a click selects one); never the whole list.
@@ -101,11 +104,26 @@ function worstCities(out) {
     h("p", { class: "empty" }, "Every city is healthy."));
 }
 
-async function render(box) {
+// The page has three regions. `head` and `body` are redrawn by every refresh and hold no input. `actions` holds the delete-city
+// control (a text input the user types into): it is only rebuilt when WHICH control applies changes, never by the timer, so what
+// is typed, the focus and the caret survive a refresh.
+function syncActions(actions, key, make) {
+  if (actions.dataset.key === key) return;
+  actions.dataset.key = key;
+  fill(actions, make ? make() : null);
+}
+
+async function render(view) {
+  if (view.busy) return;                                         // a slow refresh is not stacked on the next tick
+  view.busy = true;
+  try { await draw(view); } finally { view.busy = false; }
+}
+
+async function draw({ head, actions, body }) {
   let s, hist;
   const scoped = currentCity();
   try { [s, hist] = await Promise.all([api(withCity("/api/status")), api(withCity("/api/history?minutes=60"))]); } catch (err) {
-    if (!box.firstChild) box.replaceChildren(h("p", { class: "error" }, err.message));
+    if (!body.firstChild) body.replaceChildren(h("p", { class: "error" }, err.message));
     return;
   }
   if (scoped !== currentCity()) return;                          // the city changed while loading: a newer render is on its way
@@ -121,14 +139,17 @@ async function render(box) {
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Fleet health, last hour (%)"), lineChart(health, { label: "Fleet health", yMax: 100, unit: "%" })),
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Readings per 30 s (by event time)"), lineChart(flow, { label: "Readings per 30 seconds" })));
   if (!s.total) {
-    if (scoped) { fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, `No sensors have reported for city ${scoped}.`))); return; }
-    if (legacy) { fill(box, legacy); return; }
-    fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, "No sensors have reported yet. The simulator starts on its own in the 'all' role; give it half a minute, or see Connect to send real readings.")));
+    syncActions(actions, `${scoped}|none`, scoped && s.legacy && can("city:delete") ? () => deleteCityControl(scoped, { onDone: () => setCity("") }) : null);
+    if (scoped) { fill(head); fill(body, h("div", { class: "card" }, h("p", { class: "empty" }, `No sensors have reported for city ${scoped}.`))); return; }
+    fill(head, legacy);
+    if (legacy) { fill(body); return; }
+    fill(body, h("div", { class: "card" }, h("p", { class: "empty" }, "No sensors have reported yet. The simulator starts on its own in the 'all' role; give it half a minute, or see Connect to send real readings.")));
     return;
   }
-  const remove = scoped && !s.legacy && can("city:delete") ? deleteCityControl(scoped, { total: s.total, onDone: () => setCity("") }) : null;
-  fill(box, burst, legacy, scoped ? h("div", { class: "row" }, h("p", { class: "muted" }, "Showing city ", h("span", { class: "scope-chip" }, scoped), ". Use the City menu to switch."), remove) : null,
-    banner(s), kpis(s), cities, heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
+  const mayDelete = scoped && can("city:delete");
+  syncActions(actions, `${scoped}|${mayDelete ? "delete" : "none"}`, mayDelete ? () => deleteCityControl(scoped, { total: s.total, onDone: () => setCity("") }) : null);
+  fill(head, burst, legacy, scoped ? h("p", { class: "muted" }, "Showing city ", h("span", { class: "scope-chip" }, scoped), ". Use the City menu to switch.") : null);
+  fill(body, banner(s), kpis(s), cities, heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
     s.protocols && s.protocols.length > 1 ? h("h2", { class: "section-title" }, "By collection protocol") : null, protocolTable(s));
 }
 
@@ -136,8 +157,10 @@ export async function initOverview() {
   const box = $("view-overview");
   clearInterval(timer);
   if (!catalog) catalog = await api("/api/catalog");
-  await render(box);
-  timer = setInterval(() => { if (document.hidden || location.hash.slice(1).split("/")[0] !== "overview" && location.hash !== "") return; render(box); }, 5000);
+  const view = { head: h("div"), actions: h("div", { class: "overview-actions" }), body: h("div") };
+  fill(box, view.head, view.actions, view.body);
+  await render(view);
+  timer = setInterval(() => { if (document.hidden || location.hash.slice(1).split("/")[0] !== "overview" && location.hash !== "") return; render(view); }, 5000);
 }
 
 export function stopOverview() { clearInterval(timer); }
