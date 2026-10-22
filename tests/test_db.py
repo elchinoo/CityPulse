@@ -11,7 +11,7 @@ if not os.environ.get("TEST_DATABASE_URL"):
 
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest  # noqa: E402
 
-from citypulse import api, auth, chaos, db, gateway, migrate, otlp, status  # noqa: E402
+from citypulse import auth, chaos, core, db, gateway, migrate, otlp, status  # noqa: E402
 from citypulse.db import connect  # noqa: E402
 
 H = {"X-CityPulse-CSRF": "1"}
@@ -25,9 +25,9 @@ def _db(monkeypatch):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("CITYPULSE_API_KEY_FILE", "/nonexistent/key")
     db.reset_pool()
-    api._failures.clear()
-    auth._setup_code = None
-    auth._token_cache.clear()
+    core.auth.limiter.clear()
+    core.local._setup_code = None
+    core.clear_token_cache()
     gateway._inflight = 0
     gateway._known.update(count=0, at=0.0)
     gateway._bursts._at = 0.0

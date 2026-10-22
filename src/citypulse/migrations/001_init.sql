@@ -1,5 +1,5 @@
 -- CityPulse schema: auth, sensors with their latest state, readings, status history and burst (chaos) controls.
-CREATE TABLE app_setting (
+CREATE TABLE IF NOT EXISTS app_setting (
     key   text PRIMARY KEY,
     value text NOT NULL
 );

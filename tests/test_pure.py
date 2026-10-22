@@ -4,7 +4,9 @@ import random
 import time
 from datetime import UTC, datetime
 
+import httpx
 import pytest
+from apgkit.auth import TokenSource
 
 from citypulse import chaos, gateway, reporter
 from citypulse.catalog import DISTRICTS, SENSOR_ID, TYPES, build_fleet
@@ -189,3 +191,56 @@ def test_reporter_points_and_p95():
                                                     "fault_pct": 1.0, "stuck_pct": 1.0,
                                                     "worst_district_pct": 25.0}   # districts under 20 sensors are ignored
     assert reporter.p95_ms() >= 0
+
+
+def _pagerlens(seen: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={})
+    return httpx.MockTransport(handler)
+
+
+def _idp(calls: list):
+    iss = "https://id.example.org"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(200, json={"issuer": iss, "token_endpoint": f"{iss}/oauth/token"})
+        calls.append(request.content.decode())
+        return httpx.Response(200, json={"access_token": "minted-token", "expires_in": 300})
+    return iss, lambda: httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_reporter_sends_a_token_minted_by_the_identity_provider():
+    calls, seen = [], []
+    iss, http = _idp(calls)
+    source = TokenSource(iss, "citypulse-service", lambda: "s", scope="pagerlens.ingest", audience="pagerlens", http=http)
+    rep = reporter.Reporter("http://pagerlens.test", None, source, transport=_pagerlens(seen))
+    asyncio.run(rep.post("/api/ingest/metrics", {}))
+    asyncio.run(rep.post("/api/ingest/metrics", {}))
+    assert seen == [("/api/ingest/metrics", "Bearer minted-token")] * 2
+    assert len(calls) == 1 and "scope=pagerlens.ingest" in calls[0] and "audience=pagerlens" in calls[0]   # minted once, then cached
+
+
+def test_a_static_pagerlens_token_wins_over_the_identity_provider(monkeypatch):
+    calls, seen = [], []
+    iss, http = _idp(calls)
+    source = TokenSource(iss, "citypulse-service", lambda: "s", scope="pagerlens.ingest", http=http)
+    rep = reporter.Reporter("http://pagerlens.test", "static-token", source, transport=_pagerlens(seen))
+    asyncio.run(rep.post("/api/ingest/metrics", {}))
+    assert seen == [("/api/ingest/metrics", "Bearer static-token")] and calls == []
+    for k in ("PAGERLENS_TOKEN_FILE",):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("PAGERLENS_URL", "http://localhost:8001")
+    monkeypatch.setenv("PAGERLENS_TOKEN", "static-token")
+    monkeypatch.setenv("CITYPULSE_OIDC_ISSUER", iss)
+    monkeypatch.setenv("CITYPULSE_SERVICE_CLIENT_SECRET", "s")
+    assert reporter.maybe_start().source is None
+    monkeypatch.delenv("PAGERLENS_TOKEN")
+    monkeypatch.setenv("PAGERLENS_TOKEN_FILE", "/nonexistent/token")
+    started = reporter.maybe_start()
+    assert started.source is not None and started.source.scope == "pagerlens.ingest" and started.source.audience == "pagerlens"
+    assert started.source.client_id == "citypulse-service"
+    monkeypatch.delenv("CITYPULSE_SERVICE_CLIENT_SECRET")
+    monkeypatch.setenv("CITYPULSE_SERVICE_CLIENT_SECRET_FILE", "/nonexistent/secret")
+    assert reporter.maybe_start() is None

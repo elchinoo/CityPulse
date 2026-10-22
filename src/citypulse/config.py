@@ -1,14 +1,13 @@
 import os
-import sys
 from dataclasses import dataclass
+
+from apgkit.config import database_url, read_secret
 
 
 @dataclass(frozen=True)
 class Settings:
     database_url: str
     role: str                 # api | sim | all
-    api_key: str
-    allow_anonymous: bool
     sim_sensors: int
     sim_speed: float          # 1.0 = real intervals; 5.0 = every sensor reports 5x as often
     ingest_url: str           # sim role: where to POST readings (api role is reached over HTTP)
@@ -18,24 +17,8 @@ class Settings:
     ingest_concurrency: int
     pagerlens_url: str
     pagerlens_token: str
-
-
-def read_secret(env: str, default_file: str = "") -> str:
-    """Secret from the environment variable, else the first line of the file named by <ENV>_FILE."""
-    value = os.environ.get(env, "")
-    if value:
-        return value
-    path = os.environ.get(f"{env}_FILE", default_file)
-    if not path:
-        return ""
-    try:
-        with open(path) as fh:
-            return fh.readline().strip()
-    except FileNotFoundError:
-        return ""
-    except OSError as exc:
-        print(f"WARNING: cannot read {env} file {path}: {exc.strerror}", file=sys.stderr)
-        return ""
+    oidc_issuer: str          # identity provider; with the service client below it lets CityPulse mint its PagerLens token
+    service_client_id: str
 
 
 def _int(name: str, default: int, lo: int, hi: int) -> int:
@@ -59,13 +42,8 @@ def get_settings() -> Settings:
     if role not in {"api", "sim", "all"}:
         raise SystemExit("CITYPULSE_ROLE must be api, sim or all")
     return Settings(
-        database_url=os.environ.get("DATABASE_URL")
-        or os.environ.get("DB_EXTERNAL_DSN")
-        or os.environ.get("PSQL_CONNECTION_STRING")
-        or "",
+        database_url=database_url(),
         role=role,
-        api_key=read_secret("CITYPULSE_API_KEY", "/etc/citypulse/api_key"),
-        allow_anonymous=os.environ.get("CITYPULSE_ALLOW_ANONYMOUS", "").lower() in {"1", "true", "yes"},
         sim_sensors=_int("SIM_SENSORS", 3000, 10, 50_000),
         sim_speed=_float("SIM_SPEED", 1.0, 1.0, 20.0),
         ingest_url=os.environ.get("CITYPULSE_INGEST_URL", "").rstrip("/"),
@@ -75,4 +53,6 @@ def get_settings() -> Settings:
         ingest_concurrency=_int("INGEST_CONCURRENCY", 8, 1, 64),
         pagerlens_url=os.environ.get("PAGERLENS_URL", "").rstrip("/"),
         pagerlens_token=read_secret("PAGERLENS_TOKEN", "/etc/citypulse/pagerlens_token"),
+        oidc_issuer=os.environ.get("CITYPULSE_OIDC_ISSUER", "").strip(),
+        service_client_id=os.environ.get("CITYPULSE_SERVICE_CLIENT_ID", "citypulse-service"),
     )

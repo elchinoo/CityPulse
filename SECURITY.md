@@ -7,6 +7,17 @@ version or commit.
 
 ## Security model
 
+**Federated sign-in** (optional, `CITYPULSE_OIDC_ISSUER`)
+- Access tokens are verified locally against the identity provider's JWKS (algorithm allow-list, issuer, audience, expiry), so
+  a token minted for another app or signed by another key is refused. Only the roles of THIS app are honoured, and they are
+  mapped to permissions in `core.py`; an authenticated person with no role here can do nothing.
+- Browser sign-in is authorization code + PKCE with state and nonce; the session is server-side and carries the person's roles
+  from the verified ID token. Sign-out also ends the single sign-on session. Role changes reach an existing session at its next sign-in.
+- Service scopes `citypulse.ingest`, `citypulse.read` and `citypulse.metrics` carry the same narrow access as the local tokens.
+  With `CITYPULSE_LOCAL_LOGIN=false` the admin-password and API-key logins are refused by the server, not just hidden.
+- The optional PagerLens reporter can mint its token with the `citypulse-service` client (client_credentials, scope
+  `pagerlens.ingest`); the secret is read from the environment or a file and never logged.
+
 **Credentials**
 - First run: no credentials exist and every protected route is denied. The server prints a one-time setup code to
   its log; whoever presents it in the browser sets the admin password. The code is held in memory only and changes
@@ -18,7 +29,7 @@ version or commit.
 - API tokens are random, shown once, stored as SHA-256 hashes, revocable, and have exactly one of four scopes:
   `ingest` (push readings; reads nothing), `read` (dashboard data; changes nothing), `metrics` (only `GET /metrics`)
   and `full` (everything an admin session can do, including starting bursts and managing tokens). Scopes are strict:
-  a non-`full` token must match the route's scope exactly.
+  each maps to exactly one permission (`ingest:write`, `city:read`, `metrics:scrape`); only `full` holds them all.
 - With no credential configured the app **denies everything**. Anonymous access exists only behind the explicit
   opt-in `CITYPULSE_ALLOW_ANONYMOUS=true`; never use it on a reachable host.
 - Failed credentials are rate limited (10 per minute per client address, in memory, per process). Behind a reverse
@@ -32,7 +43,7 @@ version or commit.
 - The gateway never blocks without bound: when its write slots or database connections are exhausted it answers
   `429` with `Retry-After`, so a flood becomes back-pressure on the sender instead of memory growth here.
 - `/metrics` needs a `metrics` token and uses route templates, never raw paths, as labels.
-- Burst controls need a `full` credential. Bursts only change the *simulated* fleet and the gateway's own delay;
+- Burst controls need the `city:control` permission (an administrator or operator, or a `full` token). Bursts only change the *simulated* fleet and the gateway's own delay;
   readings from real sensors are never altered. Duration is capped at 30 minutes and active bursts at 50.
 
 **Outbound requests**

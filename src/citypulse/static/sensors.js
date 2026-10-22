@@ -1,5 +1,5 @@
-import { api } from "/static/api.js";
-import { $, field, fill, h } from "/static/ui.js";
+import { api } from "/kit/api.js";
+import { $, field, fill, h } from "/kit/ui.js";
 
 let catalog = null;
 const ago = (iso) => {

@@ -1,4 +1,4 @@
-import { $, copy, fill, h } from "/static/ui.js";
+import { $, copy, fill, h } from "/kit/ui.js";
 
 const block = (text) => h("div", { class: "codewrap" }, h("pre", { class: "code" }, h("code", {}, text)),
   h("button", { class: "secondary small", type: "button", onclick: () => copy(text) }, "Copy"));

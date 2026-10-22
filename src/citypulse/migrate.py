@@ -1,23 +1,24 @@
-"""Tiny plain-SQL migration runner."""
+"""Tiny plain-SQL migration runner (the runner itself lives in agentpg-kit)."""
 from pathlib import Path
-
-from .db import connect
 
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 
 
 def run() -> list[str]:
-    applied: list[str] = []
-    with connect() as conn:
-        # Two replicas may start together: serialise migrations.
-        conn.execute("SELECT pg_advisory_xact_lock(727401)")
-        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
-        done = {r["name"] for r in conn.execute("SELECT name FROM schema_migrations")}
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name in done:
-                continue
-            conn.execute(path.read_text())
-            conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
-            applied.append(path.name)
-        conn.commit()
+    """Apply the SQL migrations. The shared tables (settings, sessions, API tokens, OIDC state) come from the kit."""
+    from apgkit import migrate as kit_migrate
+    from apgkit.auth.schema import SQL as AUTH_SQL
+
+    from .core import db
+
+    # Two replicas may start together: serialise migrations.
+    with db.connect() as lock_conn:
+        lock_conn.execute("SELECT pg_advisory_lock(727401)")
+        try:
+            applied = kit_migrate.run(db, MIGRATIONS)
+            with db.connect() as conn:  # after the app's own migrations: it upgrades the session table and adds the OIDC state
+                conn.execute(AUTH_SQL)
+                conn.commit()
+        finally:
+            lock_conn.execute("SELECT pg_advisory_unlock(727401)")
     return applied

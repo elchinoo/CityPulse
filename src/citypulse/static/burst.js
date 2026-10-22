@@ -1,5 +1,5 @@
-import { api } from "/static/api.js";
-import { $, fill, h, toast } from "/static/ui.js";
+import { api } from "/kit/api.js";
+import { $, fill, h, toast } from "/kit/ui.js";
 
 let timer = null;
 let catalog = null;

@@ -1,6 +1,6 @@
-import { api } from "/static/api.js";
+import { api } from "/kit/api.js";
 import { lineChart } from "/static/charts.js";
-import { $, fill, h } from "/static/ui.js";
+import { $, fill, h } from "/kit/ui.js";
 
 const LABEL = { operational: "All systems operational", degraded: "Degraded", partial_outage: "Partial outage", major_outage: "Major outage" };
 let timer = null;

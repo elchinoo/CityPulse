@@ -1,6 +1,8 @@
 """Optional: push CityPulse's own health to PagerLens, so PagerLens can open and investigate incidents.
 
-Enabled by PAGERLENS_URL + PAGERLENS_TOKEN (an ingest-scope PagerLens token, from the environment or a file).
+Enabled by PAGERLENS_URL + PAGERLENS_TOKEN (an ingest-scope PagerLens token, from the environment or a file). Instead of a
+hand-copied token, CityPulse can ask the ecosystem identity provider for one (client_credentials, scope pagerlens.ingest) when
+CITYPULSE_OIDC_ISSUER and CITYPULSE_SERVICE_CLIENT_SECRET[_FILE] are set; a static token wins if both are given.
 Two services are reported, mirroring cause and effect:
   citypulse-ingest   the gateway: up, ingest rate, reject rate, p95 batch latency, overloaded rate
   citypulse-fleet    the sensors: health, offline / stale / fault / stuck shares (depends on citypulse-ingest)
@@ -12,6 +14,8 @@ import sys
 import time
 
 import httpx
+from apgkit.auth import TokenSource
+from apgkit.config import read_secret
 
 from . import __version__, metrics, status
 from .config import get_settings
@@ -90,16 +94,18 @@ def _summary() -> dict:
 
 
 class Reporter:
-    def __init__(self, url: str, token: str):
-        self.client = httpx.AsyncClient(base_url=url, timeout=15, follow_redirects=False,
-                                        headers={"Authorization": f"Bearer {token}"})
+    def __init__(self, url: str, token: str | None = None, source: TokenSource | None = None, transport=None):
+        self.source = None if token else source
+        self.client = httpx.AsyncClient(base_url=url, timeout=15, follow_redirects=False, transport=transport,
+                                        headers={"Authorization": f"Bearer {token}"} if token else {})
         self.rates = Rates()
         self.registered = False
         self.last_state = "operational"
         self.last_alert = 0.0
 
     async def post(self, path: str, body: dict) -> None:
-        r = await self.client.post(path, json=body)
+        headers = await asyncio.to_thread(self.source.headers) if self.source else None   # cached; refreshed shortly before it expires
+        r = await self.client.post(path, json=body, headers=headers)
         if r.status_code >= 300:
             raise RuntimeError(f"PagerLens answered HTTP {r.status_code} on {path}")
 
@@ -141,11 +147,20 @@ class Reporter:
             await asyncio.sleep(INTERVAL)
 
 
+def _service_source(cfg) -> TokenSource | None:
+    """A token source for PagerLens from the identity provider, if CityPulse's service client is configured."""
+    if not (cfg.oidc_issuer and read_secret("CITYPULSE_SERVICE_CLIENT_SECRET")):
+        return None
+    return TokenSource(cfg.oidc_issuer, cfg.service_client_id, lambda: read_secret("CITYPULSE_SERVICE_CLIENT_SECRET"),
+                       scope="pagerlens.ingest", audience="pagerlens")
+
+
 def maybe_start() -> Reporter | None:
     cfg = get_settings()
-    if not (cfg.pagerlens_url and cfg.pagerlens_token):
+    source = None if cfg.pagerlens_token else _service_source(cfg)
+    if not (cfg.pagerlens_url and (cfg.pagerlens_token or source)):
         return None
     if cfg.pagerlens_url.startswith("http://") and not any(h in cfg.pagerlens_url for h in ("//localhost", "//127.0.0.1")):
         print("reporter: refusing to send a token over plain http to a non-local PagerLens", file=sys.stderr)
         return None
-    return Reporter(cfg.pagerlens_url, cfg.pagerlens_token)
+    return Reporter(cfg.pagerlens_url, cfg.pagerlens_token or None, source)

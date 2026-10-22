@@ -100,6 +100,35 @@ Pick one (or both; the Connect tab has copy-paste snippets):
    accepted as `PAGERLENS_TOKEN_FILE`). Every 15 s it pushes two services, `citypulse-ingest` (up, rate, reject %,
    overloaded %, latency_p95_ms) and `citypulse-fleet` (health, offline/stale/fault/stuck %, worst district; depends on the ingest service),
    and raises a `SensorFleetDegraded` alert when the verdict worsens (repeated every 10 minutes while it lasts).
+   With the identity provider (below) no hand-copied token is needed: CityPulse mints its own PagerLens token.
+
+## Single sign-on and roles (the ecosystem identity provider)
+
+CityPulse can run **standalone** (the first-run setup code and an admin password, as above) or **federated** with the ecosystem's
+[identity provider](https://github.com/elchinoo/agentpg-identity). Register two clients there:
+
+* a `web` client, id `citypulse`, redirect URI `https://<citypulse>/auth/callback`, with the roles below (browser sign-in), and
+* optionally a `service` client, id `citypulse-service`, allowed to call `pagerlens` (CityPulse's own outbound identity).
+
+| Variable | Meaning |
+|---|---|
+| `CITYPULSE_OIDC_ISSUER` | The identity provider's URL. Federation is off when unset. |
+| `CITYPULSE_OIDC_CLIENT_ID` | The web client, default `citypulse`. |
+| `CITYPULSE_OIDC_CLIENT_SECRET[_FILE]` | Its secret from the provider. |
+| `CITYPULSE_PUBLIC_URL` | The URL CityPulse is reached at (used to build the callback). |
+| `CITYPULSE_LOCAL_LOGIN` | `false` removes the admin-password and API-key login when SSO is on (default keeps them as a break-glass). |
+| `CITYPULSE_SERVICE_CLIENT_ID` | The service client, default `citypulse-service`. |
+| `CITYPULSE_SERVICE_CLIENT_SECRET[_FILE]` | Its secret. With the issuer set, CityPulse asks the provider for its PagerLens token (scope `pagerlens.ingest`) instead of using `PAGERLENS_TOKEN`; a static `PAGERLENS_TOKEN` wins if both are set. |
+
+| Role | May |
+|---|---|
+| `admin` | everything, including API tokens and the admin password |
+| `operator` | see all dashboards, sensors and bursts, and start or stop bursts; no tokens, accounts or settings |
+| `viewer` | see the dashboards, sensors and active bursts; change nothing |
+
+Services use `client_credentials` instead of a hand-copied token: scope `citypulse.ingest` pushes readings (and nothing else),
+`citypulse.read` reads the dashboard data, `citypulse.metrics` scrapes `/metrics`. Local API tokens (`ingest`, `read`, `metrics`,
+`full`) and the static key keep working beside them with exactly the access they always had.
 
 ## Configuration
 
@@ -114,6 +143,7 @@ Pick one (or both; the Connect tab has copy-paste snippets):
 | `MAX_SENSORS` | `50000` | Cap on auto-registered sensors (bounds abuse) |
 | `INGEST_CONCURRENCY` | `8` | Batches written at once before the gateway answers 429 |
 | `PAGERLENS_URL`, `PAGERLENS_TOKEN` | – | Report to PagerLens (https required unless localhost) |
+| `CITYPULSE_OIDC_ISSUER` and friends | – | Single sign-on and service identity; see below |
 | `CITYPULSE_API_KEY` | – | Optional static full-access key for automation |
 | `CITYPULSE_ALLOW_ANONYMOUS` | `false` | Demo only: disables authentication entirely |
 
@@ -150,7 +180,7 @@ make test-db                     # everything, against a throwaway database on t
 
 The suite covers validation, the simulator's behaviour under every burst, back-pressure and retry, each status
 verdict, token scopes (ingest cannot read, read cannot write, metrics only scrapes), OTLP in all three encodings
-including a gzip bomb, and `/metrics`.
+including a gzip bomb, `/metrics`, and the federated paths (roles, service scopes, SSO login with a mocked provider; those run with `make test-db`).
 
 ## Honest limits
 

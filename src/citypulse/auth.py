@@ -1,171 +1,59 @@
-"""Credentials: admin password, web sessions and API tokens. Only hashes are ever stored.
+"""Credentials. The implementation lives in agentpg-kit (`apgkit.auth`); this module keeps the old function names for the
+few callers that still use them (setup, password change, sessions, tokens) and exposes this app's pieces from `core`."""
+from apgkit.ids import sha256  # noqa: F401
 
-* First run: a one-time *setup code* is printed to the server log. Presenting it in the browser lets the first
-  person set the admin password.
-* Browser: password login creates a server-side session held in an HttpOnly cookie.
-* Machines: API tokens created in the UI, shown once, revocable. Scopes: `ingest` (sensors and collectors push
-  readings, nothing else), `read`, `metrics` (only GET /metrics) and `full`.
-* Optional static key: CITYPULSE_API_KEY (env or file) works as a full-access credential for automation.
-"""
-import hashlib
-import hmac
-import secrets
-import time
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from . import core
 
-from . import passwords
-from . import settings_store as store
-from .config import get_settings
-
+local = core.local
+TOKEN_PREFIX = core.TOKEN_PREFIX
 SESSION_HOURS = 12
-TOKEN_PREFIX = "cp_"
-SCOPES = {"read", "ingest", "metrics", "full"}
-_K_ADMIN = "admin_password_hash"
-_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no look-alike characters  # pragma: allowlist secret
-_setup_code: str | None = None
-
-
-@dataclass(frozen=True)
-class Principal:
-    kind: str   # "session" | "token" | "static" | "anonymous"
-    scope: str
-    ident: int | None = None
-
-
-def sha256(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def setup_code() -> str:
-    global _setup_code
-    if _setup_code is None:
-        raw = "".join(secrets.choice(_ALPHABET) for _ in range(12))
-        _setup_code = f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
-    return _setup_code
+    return local.setup_code()
 
 
 def admin_configured(conn) -> bool:
-    return store.get(conn, _K_ADMIN) is not None
+    return local.admin_configured(conn)
 
 
 def static_key_configured() -> bool:
-    return bool(get_settings().api_key)
+    return local.static_key_configured()
 
 
 def needs_setup(conn) -> bool:
-    return not admin_configured(conn) and not static_key_configured()
+    return local.needs_setup(conn)
 
 
 def complete_setup(conn, code: str, password: str) -> None:
-    global _setup_code
-    if admin_configured(conn):
-        raise PermissionError("setup is already complete")
-    if not hmac.compare_digest(code.strip().upper().encode(), setup_code().encode()):
-        raise PermissionError("invalid setup code")
-    set_admin_password(conn, password)
-    _setup_code = None
+    local.complete_setup(conn, code, password)
 
 
 def set_admin_password(conn, password: str) -> None:
-    passwords.check_strength(password)
-    store.put(conn, _K_ADMIN, passwords.hash_password(password))
-    conn.commit()
+    local.set_admin_password(conn, password)
 
 
 def login_password(conn, password: str) -> bool:
-    stored = store.get(conn, _K_ADMIN)
-    return stored is not None and passwords.verify_password(password, stored)
+    return local.login_password(conn, password)
 
 
 def change_password(conn, current: str, new: str) -> None:
-    stored = store.get(conn, _K_ADMIN)
-    if stored is None or not passwords.verify_password(current, stored):
-        raise PermissionError("current password is incorrect")
-    set_admin_password(conn, new)
+    local.change_password(conn, current, new)
 
 
 def reset_admin(conn) -> None:
-    """Operator recovery: forget the admin password and sign everyone out."""
-    store.delete(conn, _K_ADMIN)
-    conn.execute("DELETE FROM web_session")
-    conn.commit()
-
-
-def create_session(conn) -> str:
-    raw = secrets.token_urlsafe(32)
-    now = datetime.now(UTC)
-    conn.execute("DELETE FROM web_session WHERE expires_at < %s", (now,))
-    conn.execute("INSERT INTO web_session (token_hash, expires_at) VALUES (%s, %s)",
-                 (sha256(raw), now + timedelta(hours=SESSION_HOURS)))
-    conn.commit()
-    return raw
-
-
-def session_valid(conn, raw: str | None) -> bool:
-    if not raw:
-        return False
-    return conn.execute("SELECT 1 FROM web_session WHERE token_hash=%s AND expires_at > now()",
-                        (sha256(raw),)).fetchone() is not None
-
-
-def delete_session(conn, raw: str | None) -> None:
-    if raw:
-        conn.execute("DELETE FROM web_session WHERE token_hash=%s", (sha256(raw),))
-        conn.commit()
+    local.reset_admin(conn)
 
 
 def create_token(conn, name: str, scope: str) -> tuple[int, str]:
-    if scope not in SCOPES:
-        raise ValueError("scope must be 'read', 'ingest', 'metrics' or 'full'")
-    raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
-    row = conn.execute(
-        "INSERT INTO api_token (name, token_hash, prefix, scope) VALUES (%s,%s,%s,%s) RETURNING id",
-        (name, sha256(raw), raw[:8], scope)).fetchone()
-    conn.commit()
-    return row["id"], raw
+    return local.create_token(conn, name, scope)
 
 
 def list_tokens(conn) -> list[dict]:
-    return conn.execute(
-        "SELECT id, name, prefix, scope, created_at, last_used_at, revoked_at FROM api_token ORDER BY id DESC").fetchall()
+    return local.list_tokens(conn)
 
 
 def revoke_token(conn, token_id: int) -> bool:
-    row = conn.execute("UPDATE api_token SET revoked_at = now() WHERE id=%s AND revoked_at IS NULL RETURNING id",
-                       (token_id,)).fetchone()
-    conn.commit()
-    _token_cache.clear()
-    return row is not None
-
-
-# Sensors push many batches a second, so a valid token is remembered briefly instead of costing a database
-# round trip (and a write) per request. Revocation takes effect at once on this process and within the TTL elsewhere.
-_TOKEN_TTL = 30.0
-_token_cache: dict[str, tuple[float, Principal]] = {}
-
-
-def token_principal(conn, raw: str) -> Principal | None:
-    if not raw.startswith(TOKEN_PREFIX):
-        return None
-    digest, now = sha256(raw), time.monotonic()
-    hit = _token_cache.get(digest)
-    if hit and hit[0] > now:
-        return hit[1]
-    row = conn.execute(
-        "UPDATE api_token SET last_used_at = now() WHERE token_hash=%s AND revoked_at IS NULL RETURNING id, scope",
-        (digest,)).fetchone()
-    conn.commit()
-    if not row:
-        _token_cache.pop(digest, None)
-        return None
-    principal = Principal("token", row["scope"], row["id"])
-    if len(_token_cache) > 1000:
-        _token_cache.clear()
-    _token_cache[digest] = (now + _TOKEN_TTL, principal)
-    return principal
-
-
-def static_key_matches(raw: str) -> bool:
-    key = get_settings().api_key
-    return bool(key) and hmac.compare_digest(raw.encode(), key.encode())
+    done = local.revoke_token(conn, token_id)
+    core.clear_token_cache()
+    return done

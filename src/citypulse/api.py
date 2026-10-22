@@ -2,27 +2,28 @@ import asyncio
 import contextlib
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import psycopg
+from apgkit.auth import TokenError
+from apgkit.auth.rp import safe_return_to
+from apgkit.config import env_bool
+from apgkit.guard import SecurityGuard
+from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import __version__, auth, chaos, gateway, metrics, otlp, reporter, sim, status
-from .auth import Principal
+from . import __version__, chaos, core, gateway, metrics, otlp, reporter, sim, status
 from .catalog import DISTRICTS, GROUPS, TYPES
 from .config import get_settings
+from .core import COOKIE, CSRF_HEADER, auth, fed, local
 from .db import connect
 
 STATIC = Path(__file__).resolve().parent / "static"
 MAX_BODY = 2 * 1024 * 1024
-COOKIE = "cp_session"
-CSRF_HEADER = "x-citypulse-csrf"
 _announced = False
 
 
@@ -32,14 +33,14 @@ def _announce_setup_code() -> None:
         _announced = True
         print("\n=== CityPulse first-run setup ===\n"
               "Open the app in your browser and enter this one-time code to create the admin password:\n"
-              f"    {auth.setup_code()}\n"
+              f"    {local.setup_code()}\n"
               "(It changes every time the server restarts until setup is complete.)\n", file=sys.stderr, flush=True)
 
 
 def _startup_tasks() -> None:
     try:
         with connect(retries=1) as conn:
-            if auth.needs_setup(conn):
+            if local.needs_setup(conn) and not fed.enabled:
                 _announce_setup_code()
     except Exception:  # noqa: BLE001 - database may be asleep; it is retried on the first request
         pass
@@ -66,135 +67,25 @@ async def lifespan(_: FastAPI):
 
 # --- authentication -------------------------------------------------------------------------
 # Fail closed: with no credential configured every protected route is denied (and the setup flow is offered),
-# unless the operator explicitly sets CITYPULSE_ALLOW_ANONYMOUS=true.
-
-_FAIL_WINDOW, _FAIL_LIMIT = 60.0, 10
-_failures: dict[str, list[float]] = {}
-
-
-def _client(request: Request) -> str:
-    return request.client.host if request.client else "?"
-
-
-def _rate_limited(client: str) -> bool:
-    now = time.monotonic()
-    recent = [t for t in _failures.get(client, []) if now - t < _FAIL_WINDOW]
-    _failures[client] = recent
-    return len(recent) >= _FAIL_LIMIT
-
-
-def _record_failure(client: str) -> None:
-    _failures.setdefault(client, []).append(time.monotonic())
-    if len(_failures) > 10_000:
-        _failures.clear()
-
-
-def _bearer(request: Request) -> str | None:
-    header = request.headers.get("authorization", "")
-    return header[7:].strip() if header[:7].lower() == "bearer " else None
-
-
-def _declared_length(request: Request) -> int:
-    value = request.headers.get("content-length", "")
-    return int(value) if value.isdigit() else 0
-
-
-def _is_https(request: Request) -> bool:
-    return request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
-
+# unless the operator explicitly sets CITYPULSE_ALLOW_ANONYMOUS=true. The mechanics (local admin, API tokens, federated
+# JWTs, sessions, rate limiting) are agentpg-kit's `Authenticator`; here we only name the permission each route needs.
 
 def _db_unavailable() -> HTTPException:
-    return HTTPException(503, "database unavailable; it may be waking up, retry in a few seconds")
+    return auth.db_unavailable()
 
 
-def authenticate(request: Request) -> Principal | None:
-    """The caller's Principal, or None if no credential was presented. Raises 401/429 for bad credentials."""
-    if get_settings().allow_anonymous:
-        return Principal("anonymous", "full")
-    client = _client(request)
-    if _rate_limited(client):
-        raise HTTPException(429, "too many failed attempts; wait a minute")
-    raw = _bearer(request)
-    if raw is not None:
-        if auth.static_key_matches(raw):
-            return Principal("static", "full")
-        if raw.startswith(auth.TOKEN_PREFIX):
-            try:
-                with connect(retries=1) as conn:
-                    principal = auth.token_principal(conn, raw)
-            except (psycopg.Error, RuntimeError) as exc:
-                raise _db_unavailable() from exc
-            if principal:
-                return principal
-        _record_failure(client)
-        raise HTTPException(401, "invalid credentials")
-    cookie = request.cookies.get(COOKIE)
-    if cookie:
-        try:
-            with connect(retries=1) as conn:
-                ok = auth.session_valid(conn, cookie)
-        except (psycopg.Error, RuntimeError) as exc:
-            raise _db_unavailable() from exc
-        if ok:
-            return Principal("session", "full")
-    return None
-
-
-def require(scope: str = "read"):
-    """Dependency: the caller must hold `scope`. 'full' (admin session or full token) satisfies everything;
-    other tokens must match exactly ('read' reads, 'ingest' pushes readings, 'metrics' scrapes /metrics)."""
-
-    def dep(request: Request) -> Principal:
-        principal = authenticate(request)
-        if principal is None:
-            raise HTTPException(401, "authentication required")
-        if principal.scope != "full" and principal.scope != scope:
-            raise HTTPException(403, f"this token cannot do that (it is a '{principal.scope}' token)")
-        return principal
-
-    return dep
-
-
-class Guard(BaseHTTPMiddleware):
-    """Records request metrics, applies the body cap and the CSRF check, and sets security headers."""
-
-    async def dispatch(self, request, call_next):
-        started = time.perf_counter()
-        status_code = 500
-        try:
-            resp = await self._dispatch(request, call_next)
-            status_code = resp.status_code
-            return resp
-        finally:
-            route = request.scope.get("route")
-            label = getattr(route, "path", None) or "other"
-            if label != "/metrics":
-                metrics.observe(request.method, label, status_code, started)
-
-    async def _dispatch(self, request, call_next):
-        path = request.url.path
-        if path.startswith(("/api/", "/v1/")) and _declared_length(request) > MAX_BODY:
-            return JSONResponse({"detail": "request body too large (2 MB limit)"}, status_code=413)
-        if (path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
-                and _bearer(request) is None and not request.headers.get(CSRF_HEADER)):
-            # Cookie-authenticated (browser) writes must carry a custom header, which cross-site pages can't set.
-            return JSONResponse({"detail": "missing CSRF header"}, status_code=403)
-        resp = await call_next(request)
-        resp.headers["X-Content-Type-Options"] = "nosniff"
-        resp.headers["X-Frame-Options"] = "DENY"
-        resp.headers["Referrer-Policy"] = "no-referrer"
-        resp.headers["Cache-Control"] = resp.headers.get("Cache-Control", "no-store")
-        resp.headers["Content-Security-Policy"] = (
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-        )
-        return resp
+def require(permission: str = "city:read"):
+    """Dependency: the caller must hold `permission`. A full token, the static key and the admin session hold all of them;
+    other tokens map to exactly one ('read' reads, 'ingest' pushes readings, 'metrics' scrapes /metrics)."""
+    return auth.require(permission)
 
 
 app = FastAPI(title="CityPulse", version=__version__, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(Guard)
+app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/",), body_prefixes=("/api/", "/v1/"),
+                   max_body=MAX_BODY, observe=core.metrics.observe)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+mount_kit_static(app)
 
 
 def _api_role() -> None:
@@ -217,7 +108,7 @@ def readyz():
         return JSONResponse({"status": "waking-database"}, status_code=503)
 
 
-@app.get("/metrics", dependencies=[Depends(require("metrics"))])
+@app.get("/metrics", dependencies=[Depends(require("metrics:scrape"))])
 def prometheus_metrics():
     body, ctype = metrics.render()
     return Response(body, media_type=ctype)
@@ -251,15 +142,15 @@ class TokenBody(BaseModel):
     scope: str = Field(pattern="^(read|ingest|metrics|full)$")
 
 
-def _start_session(conn, request: Request, response: Response) -> None:
-    raw = auth.create_session(conn)
-    response.set_cookie(COOKIE, raw, httponly=True, samesite="strict", secure=_is_https(request),
-                        max_age=auth.SESSION_HOURS * 3600, path="/")
+def _start_session(conn, request: Request, response: Response, **who) -> None:
+    raw = local.create_session(conn, **who)
+    response.set_cookie(COOKIE, raw, httponly=True, samesite="strict" if not who else "lax", secure=is_https(request),
+                        max_age=12 * 3600, path="/")
 
 
 def _guard_attempts(request: Request) -> str:
-    client = _client(request)
-    if _rate_limited(client):
+    client = auth.client(request)
+    if auth.limiter.limited(client):
         raise HTTPException(429, "too many failed attempts; wait a minute")
     return client
 
@@ -269,10 +160,10 @@ def session_state(request: Request):
     """Public: tells the UI which screen to show. Reveals no secrets."""
     _api_role()
     try:
-        principal = authenticate(request)
+        principal = auth.authenticate(request)
         with connect(retries=1) as conn:
-            setup = auth.needs_setup(conn) and not get_settings().allow_anonymous
-            has_password = auth.admin_configured(conn)
+            setup = local.needs_setup(conn) and not env_bool("CITYPULSE_ALLOW_ANONYMOUS") and not fed.enabled
+            has_password = local.admin_configured(conn)
     except HTTPException:
         raise
     except (psycopg.Error, RuntimeError) as exc:
@@ -280,8 +171,49 @@ def session_state(request: Request):
     if setup:
         _announce_setup_code()
     state = "setup_required" if setup else "logged_in" if principal else "logged_out"
-    return {"state": state, "has_admin_password": has_password, "password_login": has_password,
-            "key_login": auth.static_key_configured(), "version": __version__}
+    out = {"state": state, "has_admin_password": has_password,
+           "password_login": has_password and (fed.local_login or not fed.enabled),
+           "key_login": local.static_key_configured() and (fed.local_login or not fed.enabled),
+           "sso": {"issuer": fed.issuer, "login_url": "/auth/login"} if fed.enabled else None, "version": __version__}
+    if principal:
+        out["user"] = {"name": principal.name, "email": principal.email, "source": principal.source, "roles": sorted(principal.roles),
+                       "permissions": ["*"] if "*" in principal.permissions else sorted(principal.permissions)}
+    return out
+
+
+# ---- federated sign-in (only when CITYPULSE_OIDC_ISSUER is set) ----------------------------------------------
+@app.get("/auth/login")
+def sso_login(request: Request, next: str | None = None):
+    if not fed.enabled:
+        raise HTTPException(404, "single sign-on is not configured")
+    try:
+        with connect(retries=1) as conn:
+            url = fed.rp.begin(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
+    except psycopg.Error as exc:
+        raise _db_unavailable() from exc
+    except Exception:  # noqa: BLE001 - the identity provider may be unreachable
+        return RedirectResponse("/?sso_error=the identity provider is unavailable", status_code=303)
+    return RedirectResponse(url, status_code=303)
+
+
+@app.get("/auth/callback")
+def sso_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if not fed.enabled:
+        raise HTTPException(404, "single sign-on is not configured")
+    if error or not code or not state:
+        return RedirectResponse("/?sso_error=the sign-in was cancelled or failed", status_code=303)
+    try:
+        with connect(retries=1) as conn:
+            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state)
+            roles = [r for r in claims.get("roles", []) if isinstance(r, str)]
+            resp = RedirectResponse(safe_return_to(back), status_code=303)
+            if not core.APP_AUTH.permissions_for(roles=roles):
+                return RedirectResponse("/?sso_error=your account has no role in CityPulse; ask an administrator", status_code=303)
+            _start_session(conn, request, resp, subject=str(claims["sub"]), name=str(claims.get("name") or ""),
+                           email=str(claims.get("email") or ""), roles=roles, source="oidc", id_token_hint=id_token)
+            return resp
+    except TokenError as exc:
+        return RedirectResponse("/?sso_error=" + str(exc)[:120], status_code=303)
 
 
 @app.post("/api/setup")
@@ -291,9 +223,9 @@ def setup(body: SetupBody, request: Request, response: Response):
     try:
         with connect(retries=1) as conn:
             try:
-                auth.complete_setup(conn, body.code, body.password)
+                local.complete_setup(conn, body.code, body.password)
             except PermissionError as exc:
-                _record_failure(client)
+                auth.limiter.record(client)
                 raise HTTPException(403, str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
@@ -307,15 +239,17 @@ def setup(body: SetupBody, request: Request, response: Response):
 def login(body: LoginBody, request: Request, response: Response):
     _api_role()
     client = _guard_attempts(request)
+    if fed.enabled and not fed.local_login:
+        raise HTTPException(403, "local sign-in is turned off; use single sign-on")
     try:
         with connect(retries=1) as conn:
             ok = False
             if body.password is not None:
-                ok = auth.login_password(conn, body.password)
-            elif body.api_key is not None and auth.static_key_matches(body.api_key):
+                ok = local.login_password(conn, body.password)
+            elif body.api_key is not None and local.static_key_matches(body.api_key):
                 ok = True
             if not ok:
-                _record_failure(client)
+                auth.limiter.record(client)
                 raise HTTPException(401, "invalid credentials")
             _start_session(conn, request, response)
     except (psycopg.Error, RuntimeError) as exc:
@@ -325,30 +259,34 @@ def login(body: LoginBody, request: Request, response: Response):
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
+    out: dict = {"ok": True}
     try:
         with connect(retries=1) as conn:
-            auth.delete_session(conn, request.cookies.get(COOKIE))
+            row = local.delete_session(conn, request.cookies.get(COOKIE))
+        if row and row["source"] == "oidc" and fed.enabled:
+            with contextlib.suppress(Exception):
+                out["logout_url"] = fed.rp.logout_url(row["id_token_hint"], public_url(request, core.public_url_env) + "/")
     except (psycopg.Error, RuntimeError):
         pass  # the cookie is cleared regardless; the session row expires on its own
     response.delete_cookie(COOKIE, path="/")
-    return {"ok": True}
+    return out
 
 
-@app.post("/api/admin-password", dependencies=[Depends(require("full"))])
+@app.post("/api/admin-password", dependencies=[Depends(require("settings:manage"))])
 def admin_password(body: PasswordBody, request: Request):
     """Set the admin password (first time, when signed in with a static key) or change it."""
     _api_role()
     client = _guard_attempts(request)
     with connect() as conn:
         try:
-            if auth.admin_configured(conn):
+            if local.admin_configured(conn):
                 if body.current is None:
                     raise HTTPException(422, "current password is required")
-                auth.change_password(conn, body.current, body.new)
+                local.change_password(conn, body.current, body.new)
             else:
-                auth.set_admin_password(conn, body.new)
+                local.set_admin_password(conn, body.new)
         except PermissionError as exc:
-            _record_failure(client)
+            auth.limiter.record(client)
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -357,27 +295,29 @@ def admin_password(body: PasswordBody, request: Request):
     return {"ok": True, "signed_out_everywhere": True}
 
 
-@app.get("/api/tokens", dependencies=[Depends(require("full"))])
+@app.get("/api/tokens", dependencies=[Depends(require("settings:manage"))])
 def list_tokens():
     _api_role()
     with connect() as conn:
-        return auth.list_tokens(conn)
+        return local.list_tokens(conn)
 
 
-@app.post("/api/tokens", dependencies=[Depends(require("full"))])
+@app.post("/api/tokens", dependencies=[Depends(require("settings:manage"))])
 def create_token(body: TokenBody):
     """The token value is returned exactly once; only its hash is stored."""
     _api_role()
     with connect() as conn:
-        token_id, raw = auth.create_token(conn, body.name.strip(), body.scope)
+        token_id, raw = local.create_token(conn, body.name.strip(), body.scope)
     return {"id": token_id, "token": raw, "scope": body.scope}
 
 
-@app.delete("/api/tokens/{token_id}", dependencies=[Depends(require("full"))])
+@app.delete("/api/tokens/{token_id}", dependencies=[Depends(require("settings:manage"))])
 def revoke_token(token_id: int):
     _api_role()
     with connect() as conn:
-        if not auth.revoke_token(conn, token_id):
+        revoked = local.revoke_token(conn, token_id)
+        core.clear_token_cache()
+        if not revoked:
             raise HTTPException(404, "no such active token")
     return {"ok": True}
 
@@ -388,7 +328,7 @@ class ReadingsBody(BaseModel):
     readings: list[Any] = Field(max_length=gateway.MAX_BATCH)
 
 
-@app.post("/api/readings", dependencies=[Depends(require("ingest"))])
+@app.post("/api/readings", dependencies=[Depends(require("ingest:write"))])
 def post_readings(body: ReadingsBody):
     """Batched sensor readings. Bad items are rejected and counted; the rest are stored.
     429 + Retry-After means the gateway is saturated: keep the batch and retry with backoff."""
@@ -412,7 +352,7 @@ async def _read_capped(request: Request) -> bytes:
     return bytes(data)
 
 
-@app.post("/v1/metrics", dependencies=[Depends(require("ingest"))])
+@app.post("/v1/metrics", dependencies=[Depends(require("ingest:write"))])
 async def otlp_metrics(request: Request):
     """OTLP/HTTP metrics: gauge and sum data points become readings (see otlp.py for the attribute mapping)."""
     _api_role()
@@ -435,7 +375,7 @@ async def otlp_metrics(request: Request):
 
 # --- the dashboard's data ------------------------------------------------------------------------
 
-@app.get("/api/catalog", dependencies=[Depends(require("read"))])
+@app.get("/api/catalog", dependencies=[Depends(require("city:read"))])
 def catalog():
     return {
         "districts": [{"id": k, "name": v} for k, v in DISTRICTS.items()],
@@ -445,7 +385,7 @@ def catalog():
     }
 
 
-@app.get("/api/status", dependencies=[Depends(require("read"))])
+@app.get("/api/status", dependencies=[Depends(require("city:read"))])
 def get_status():
     _api_role()
     try:
@@ -458,7 +398,7 @@ def get_status():
     return s
 
 
-@app.get("/api/history", dependencies=[Depends(require("read"))])
+@app.get("/api/history", dependencies=[Depends(require("city:read"))])
 def get_history(minutes: int = Query(60, ge=5, le=720)):
     _api_role()
     with connect() as conn:
@@ -468,7 +408,7 @@ def get_history(minutes: int = Query(60, ge=5, le=720)):
 _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 
 
-@app.get("/api/sensors", dependencies=[Depends(require("read"))])
+@app.get("/api/sensors", dependencies=[Depends(require("city:read"))])
 def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"),
                  type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24),
                  q: str | None = Query(None, max_length=64), limit: int = Query(100, ge=1, le=500)):
@@ -496,7 +436,7 @@ def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|o
         return conn.execute(sql, [*args, limit]).fetchall()
 
 
-@app.get("/api/sensors/{sensor_id}", dependencies=[Depends(require("read"))])
+@app.get("/api/sensors/{sensor_id}", dependencies=[Depends(require("city:read"))])
 def get_sensor(sensor_id: str):
     _api_role()
     if not _SENSOR_ID.match(sensor_id):
@@ -523,14 +463,14 @@ class StormBody(BaseModel):
     seconds: int = Field(default=180, ge=5, le=chaos.MAX_SECONDS)
 
 
-@app.get("/api/chaos", dependencies=[Depends(require("read"))])
+@app.get("/api/chaos", dependencies=[Depends(require("city:read"))])
 def get_chaos():
     _api_role()
     with connect() as conn:
         return {"active": chaos.active(conn), "kinds": chaos.KINDS}
 
 
-@app.post("/api/chaos", dependencies=[Depends(require("full"))])
+@app.post("/api/chaos", dependencies=[Depends(require("city:control"))])
 def post_chaos(body: BurstBody):
     _api_role()
     try:
@@ -540,7 +480,7 @@ def post_chaos(body: BurstBody):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/chaos/storm", dependencies=[Depends(require("full"))])
+@app.post("/api/chaos/storm", dependencies=[Depends(require("city:control"))])
 def post_storm(body: StormBody):
     """The burst button: several faults at once."""
     _api_role()
@@ -551,7 +491,7 @@ def post_storm(body: StormBody):
         raise HTTPException(422, str(exc)) from exc
 
 
-@app.post("/api/chaos/stop", dependencies=[Depends(require("full"))])
+@app.post("/api/chaos/stop", dependencies=[Depends(require("city:control"))])
 def post_stop():
     _api_role()
     with connect() as conn:
