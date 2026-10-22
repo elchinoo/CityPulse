@@ -28,7 +28,7 @@ version or commit.
   custom header, and no credential is kept in page storage.
 - API tokens are random, shown once, stored as SHA-256 hashes, revocable, and have exactly one of four scopes:
   `ingest` (push readings; reads nothing), `read` (dashboard data; changes nothing), `metrics` (only `GET /metrics`)
-  and `full` (everything an admin session can do, including starting bursts and managing tokens). Scopes are strict:
+  and `full` (everything an admin session can do, including starting bursts, managing tokens and deleting cities). Scopes are strict:
   each maps to exactly one permission (`ingest:write`, `city:read`, `metrics:scrape`); only `full` holds them all.
 - With no credential configured the app **denies everything**. Anonymous access exists only behind the explicit
   opt-in `CITYPULSE_ALLOW_ANONYMOUS=true`; never use it on a reachable host.
@@ -37,12 +37,18 @@ version or commit.
 
 **Collection paths**
 - `/api/readings` and `/v1/metrics` need an `ingest` token. Every item is validated (sensor id, known type,
-  district, optional city, finite number within bounds, timestamp window of 24 hours back and 2 minutes ahead). Request bodies are
+  district, required city, finite number within bounds, timestamp window of 24 hours back and 2 minutes ahead). Request bodies are
   capped at 2 MB, batches at 1000 readings, gzip bodies are inflated with a hard 8 MB limit, and unknown encodings
   and content types are refused. The number of auto-registered sensors is capped (`MAX_SENSORS`).
 - The gateway never blocks without bound: when its write slots or database connections are exhausted it answers
   `429` with `Retry-After`, so a flood becomes back-pressure on the sender instead of memory growth here.
 - `/metrics` needs a `metrics` token and uses route templates, never raw paths, as labels.
+- A reading without a `city`, or naming the reserved legacy id `default`, is rejected and counted; the database column has no
+  default either (migration 004), so nothing can invent a city.
+- Deleting a city (`DELETE /api/cities/<id>`) is irreversible and needs the `city:delete` permission: the `admin` role or a
+  `full` token (the wildcard holders); `operator`, `viewer` and the `ingest`, `read` and `metrics` scopes cannot. It deletes in
+  batches of 5000 rows per transaction under an advisory lock (one at a time), takes the id as a validated path parameter
+  bound as an SQL parameter, and the dashboard asks for the city id to be typed. Browser calls also need the CSRF header.
 - Burst controls need the `city:control` permission (an administrator or operator, or a `full` token). Bursts only change the *simulated* fleet and the gateway's own delay;
   readings from real sensors are never altered. Duration is capped at 30 minutes and active bursts at 50.
 
@@ -55,7 +61,7 @@ version or commit.
 - The image runs as a non-root user, holds no secrets, and takes its connection details at runtime.
 - City ids are data: validated against `^[a-z0-9][a-z0-9_-]{0,31}$` at ingest, in query parameters, in burst targets (also a
   database CHECK), always passed as SQL parameters (the `/api/cities?q=` prefix is escaped for `LIKE`), and written into the page
-  only with `textContent`. A sensor cannot change city after its first reading, so a leaked ingest token cannot move or
+  only with `textContent` (the delete confirmation included). A sensor cannot change city after its first reading, so a leaked ingest token cannot move or
   hide an existing sensor under another city. Per-city access control does not exist: `city:read` sees every city.
 - All SQL is parameterised. Sensor search uses `position()` rather than `LIKE`, so user input has no wildcard
   semantics. The interface sets a strict Content-Security-Policy (no inline scripts or styles), `X-Frame-Options:

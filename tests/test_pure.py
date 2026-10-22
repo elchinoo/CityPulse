@@ -25,13 +25,13 @@ def test_catalogue_has_27_types_with_sane_limits():
 
 
 def test_fleet_is_deterministic_unique_and_valid():
-    a, b = build_fleet(3000), build_fleet(3000)
+    a, b = build_fleet(3000, "paris"), build_fleet(3000, "paris")
     assert a == b and len({x[0] for x in a}) == len(a)
     assert all(SENSOR_ID.match(x[0]) and x[1] in TYPES and x[2] in DISTRICTS for x in a)
     assert 2900 <= len(a) <= 3100
 
 
-GOOD = {"sensor": "temp-d01-0001", "type": "temperature", "district": "d01", "value": 21.5}
+GOOD = {"sensor": "temp-d01-0001", "type": "temperature", "district": "d01", "city": "paris", "value": 21.5}
 
 
 @pytest.mark.parametrize("patch,reason", [
@@ -57,7 +57,7 @@ def test_validate_rejects_with_a_reason(patch, reason):
 def test_validate_accepts_and_normalises():
     now = datetime.now(UTC)
     sensor, kind, district, ts, value, protocol, city = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
-    assert (sensor, kind, district, value, protocol, city) == ("temp-d01-0001", "temperature", "d01", 21.5, "http", "default")
+    assert (sensor, kind, district, value, protocol, city) == ("temp-d01-0001", "temperature", "d01", 21.5, "http", "paris")
     assert 3 < (now - ts).total_seconds() < 9            # milliseconds epoch understood
     assert gateway.validate("not a dict", NOW) == "item is not an object"
     # a value past the physical limits is VALID input (it becomes a fault later), not a rejection
@@ -91,7 +91,7 @@ class _Sink:
         self.sent.append(readings)
 
 
-def _sim(n=300, sink=None, bursts=None, seed=1, city="default"):
+def _sim(n=300, sink=None, bursts=None, seed=1, city="paris"):
     return Simulator(n, 1.0, sink or _Sink(), lambda: bursts or [], random.Random(seed), city=city)
 
 
@@ -258,9 +258,15 @@ def test_validate_rejects_a_bad_city(city):
     assert gateway.validate({**GOOD, "city": city}, NOW) == "bad city"
 
 
-def test_a_missing_or_null_city_is_the_default_city():
-    assert gateway.validate(GOOD, NOW)[6] == "default"
-    assert gateway.validate({**GOOD, "city": None}, NOW)[6] == "default"
+def test_a_missing_or_null_city_is_rejected():
+    no_city = {k: v for k, v in GOOD.items() if k != "city"}
+    assert gateway.validate(no_city, NOW) == "city is required"
+    assert gateway.validate({**GOOD, "city": None}, NOW) == "city is required"
+
+
+def test_the_legacy_city_id_is_reserved():
+    assert "reserved" in gateway.validate({**GOOD, "city": "default"}, NOW)
+    assert isinstance(gateway.validate({**GOOD, "city": "default2"}, NOW), tuple)
 
 
 def test_city_targets_for_bursts():
@@ -275,9 +281,10 @@ def test_city_targets_for_bursts():
 
 
 def test_the_simulator_sends_its_city_and_keeps_ids_unique_across_cities():
-    plain, paris, rome = _sim(), _sim(city="paris"), _sim(city="rome")
+    plain, paris, rome = _sim(city="oslo"), _sim(city="paris"), _sim(city="rome")
     item = plain.read(plain.sensors[0], time.time(), [])
-    assert "city" not in item                                                             # default city: payload as before
+    assert item["city"] == "oslo" and item["sensor"].startswith("oslo.")                 # every reading names its city
+    assert all("city" in x for x in paris.due_readings(time.time() + 3600, []))
     p = paris.read(paris.sensors[0], time.time(), [])
     assert p["city"] == "paris" and p["sensor"].startswith("paris.") and isinstance(gateway.validate(p, NOW), tuple)
     assert {s.id for s in paris.sensors}.isdisjoint({s.id for s in rome.sensors}) and len(paris.sensors) == len(plain.sensors)
@@ -290,12 +297,47 @@ def test_the_simulator_sends_its_city_and_keeps_ids_unique_across_cities():
 def test_citypulse_city_setting(monkeypatch):
     from citypulse.config import get_settings
     monkeypatch.delenv("CITYPULSE_CITY", raising=False)
-    assert get_settings().sim_city == "default"
+    assert get_settings().sim_city == ""                       # no default: unset stays unset
     monkeypatch.setenv("CITYPULSE_CITY", "oslo")
     assert get_settings().sim_city == "oslo"
     monkeypatch.setenv("CITYPULSE_CITY", "Not Valid")
     with pytest.raises(SystemExit):
         get_settings()
+    monkeypatch.setenv("CITYPULSE_CITY", "default")            # the retired legacy id is not a usable simulator city
+    with pytest.raises(SystemExit, match="legacy"):
+        get_settings()
+
+
+@pytest.mark.parametrize("role,value", [("sim", None), ("all", None), ("sim", ""), ("all", "   ")])
+def test_the_built_in_simulator_refuses_to_start_without_a_city(monkeypatch, role, value):
+    from citypulse import cli, sim
+    monkeypatch.setenv("CITYPULSE_ROLE", role)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u@127.0.0.1:1/none")
+    monkeypatch.setenv("CITYPULSE_INGEST_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("CITYPULSE_INGEST_TOKEN", "x")
+    if value is None:
+        monkeypatch.delenv("CITYPULSE_CITY", raising=False)
+    else:
+        monkeypatch.setenv("CITYPULSE_CITY", value)
+    with pytest.raises(SystemExit, match="CITYPULSE_CITY"):
+        sim.make(direct=role == "all")
+    with pytest.raises(SystemExit, match="CITYPULSE_CITY"):
+        cli.main(["start"])                                    # before it migrates or serves anything
+    with pytest.raises(SystemExit, match="CITYPULSE_CITY"):
+        cli.main(["serve"])
+
+
+def test_the_api_role_needs_no_city_and_the_simulator_starts_with_one(monkeypatch):
+    from citypulse import sim
+    from citypulse.config import get_settings
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u@127.0.0.1:1/none")
+    monkeypatch.setenv("CITYPULSE_ROLE", "api")
+    monkeypatch.delenv("CITYPULSE_CITY", raising=False)
+    assert get_settings().role == "api"                        # nothing asks for a city
+    monkeypatch.setenv("CITYPULSE_ROLE", "all")
+    monkeypatch.setenv("CITYPULSE_CITY", "oslo")
+    s = sim.make(direct=True)
+    assert s.city == "oslo" and s.sensors[0].id.startswith("oslo.")
 
 
 def test_otlp_maps_the_city_attribute():
@@ -335,19 +377,25 @@ def _of(posts, path, key="service"):
     return [(b[key], b) for p, b in posts if p == path]
 
 
-def test_reporter_with_only_the_default_city_behaves_as_before(monkeypatch):
-    bad = {"overall": _summary(None, 50, 100, "partial_outage"), "multi": False, "cities": {}}
-    rep, posts = _run_reporter(monkeypatch, [bad])
+def test_reporter_with_one_city_behaves_like_with_many(monkeypatch):
+    # one city with a problem: the alert is per city, never fleet-wide (there is no special case for a single city)
+    snap = {"overall": _summary(None, 50, 100, "partial_outage"), "cities": {"paris": _summary("paris", 50, 100, "partial_outage")}}
+    rep, posts = _run_reporter(monkeypatch, [snap])
     asyncio.run(rep.report())
     alerts = _of(posts, "/api/ingest/alerts")
-    assert [a[0] for a in alerts] == ["citypulse-fleet"] and "city" not in alerts[0][1]["labels"]
-    assert {s for s, _ in _of(posts, "/api/ingest/services", "name")} == {"citypulse-ingest", "citypulse-fleet"}
+    assert [a[0] for a in alerts] == ["citypulse-fleet-paris"] and alerts[0][1]["labels"]["city"] == "paris"
+    assert {s for s, _ in _of(posts, "/api/ingest/services", "name")} == {"citypulse-ingest", "citypulse-fleet", "citypulse-fleet-paris"}
+    # and a single healthy city raises nothing and registers no city service
+    healthy = {"overall": _summary(None, 100, 100, "operational"), "cities": {}}
+    rep, posts = _run_reporter(monkeypatch, [healthy])
+    asyncio.run(rep.report())
+    assert _of(posts, "/api/ingest/alerts") == []
     assert [s for s, _ in _of(posts, "/api/ingest/metrics")] == ["citypulse-ingest", "citypulse-fleet"]
 
 
 def test_reporter_alerts_per_city_and_only_for_cities_with_problems(monkeypatch):
     overall = _summary(None, 70, 100, "degraded")
-    snap = {"overall": overall, "multi": True, "cities": {"paris": _summary("paris", 5, 10, "partial_outage")}}
+    snap = {"overall": overall, "cities": {"paris": _summary("paris", 5, 10, "partial_outage")}}
     rep, posts = _run_reporter(monkeypatch, [snap, snap])
     asyncio.run(rep.report())
     alerts = _of(posts, "/api/ingest/alerts")
@@ -363,7 +411,7 @@ def test_reporter_alerts_per_city_and_only_for_cities_with_problems(monkeypatch)
 
 def test_reporter_escalates_and_recovers_a_city(monkeypatch):
     def snap(city_summary):
-        return {"overall": _summary(None, 90, 100, "degraded"), "multi": True, "cities": {"rome": city_summary} if city_summary else {}}
+        return {"overall": _summary(None, 90, 100, "degraded"), "cities": {"rome": city_summary} if city_summary else {}}
     rep, posts = _run_reporter(monkeypatch, [snap(_summary("rome", 8, 10, "degraded")), snap(_summary("rome", 3, 10, "partial_outage")),
                                              snap(_summary("rome", 10, 10, "operational"))])
     asyncio.run(rep.report())

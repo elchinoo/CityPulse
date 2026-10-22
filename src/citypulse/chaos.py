@@ -3,7 +3,7 @@ import random
 import time
 from dataclasses import dataclass
 
-from .catalog import CITY_ID, DEFAULT_CITY, DISTRICTS, TYPES
+from .catalog import CITY_ID, DISTRICTS, TYPES
 
 KINDS = {
     "flood": "Sensors report many times more often: stresses the ingest gateway.",
@@ -28,7 +28,7 @@ class Burst:
     target: str
     intensity: int
 
-    def matches(self, sensor_type: str, district: str, city: str = DEFAULT_CITY) -> bool:
+    def matches(self, sensor_type: str, district: str, city: str = "") -> bool:
         if self.target == "all":
             return True
         scope, _, key = self.target.partition(":")

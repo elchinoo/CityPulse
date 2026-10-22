@@ -19,6 +19,7 @@ services:
     environment:
       DATABASE_URL: postgresql://citypulse:${POSTGRES_PASSWORD}@db:5432/citypulse
       CITYPULSE_ROLE: all
+      CITYPULSE_CITY: ${CITYPULSE_CITY:?set CITYPULSE_CITY in .env (the simulator city, e.g. paris)}
       SIM_SENSORS: "3000"
       # First run prints a one-time setup code: see `docker compose logs api`.
     ports: ["127.0.0.1:8002:8000"]

@@ -1,6 +1,7 @@
 // The city selector and the chosen city. With thousands of cities nothing here lists them all: the picker asks the server
 // (/api/cities?q=…) for the first few matches as you type. City ids are data: they only ever reach the page through textContent.
 import { api } from "/kit/api.js";
+import { LEGACY_TEXT } from "/static/citydelete.js";
 import { fill, h } from "/kit/ui.js";
 
 const KEY = "citypulse.city";
@@ -34,9 +35,9 @@ export function renderCityPicker(box) {
   const panel = h("div", { id: "city-panel", class: "city-panel card", hidden: true }, search, list, note);
 
   const choose = (id) => { setCity(id); close(); };
-  const item = (id, text, sub, cls) => h("li", { role: "option", "aria-selected": String(id === current), class: `city-opt ${id === current ? "sel" : ""}`, tabindex: "-1",
+  const item = (id, text, sub, cls, legacy) => h("li", { role: "option", "aria-selected": String(id === current), class: `city-opt ${id === current ? "sel" : ""}`, tabindex: "-1",
     onclick: () => choose(id), onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(id); } } },
-  h("span", { class: "city-name" }, text), sub ? h("span", { class: `st ${cls || ""}` }, sub) : null);
+  h("span", { class: "city-name" }, text, legacy ? h("small", { class: "legacy-tag" }, ` ${LEGACY_TEXT}`) : null), sub ? h("span", { class: `st ${cls || ""}` }, sub) : null);
 
   async function load() {
     const mine = ++seq;
@@ -47,7 +48,7 @@ export function renderCityPicker(box) {
       return;
     }
     if (mine !== seq) return;                                   // a newer search is in flight
-    const rows = out.cities.map((c) => item(c.city, c.city, c.worst_status === "ok" ? "ok" : `${c.total - c.counts.ok} down`, c.worst_status));
+    const rows = out.cities.map((c) => item(c.city, c.city, c.worst_status === "ok" ? "ok" : `${c.total - c.counts.ok} down`, c.worst_status, c.legacy));
     fill(list, q ? null : item("", "All cities", `${out.total.toLocaleString()} cities`), ...rows);
     note.textContent = !out.total ? (q ? "No city starts with that." : "No city has reported yet.")
       : out.total > out.cities.length ? `Showing ${out.cities.length} of ${out.total.toLocaleString()}${q ? "" : ", least healthy first"}. Type to narrow down.` : "";

@@ -17,7 +17,7 @@ It is a sample project: small enough to read in an afternoon, built to be extend
 ```
 
 * **One image, two roles.** `CITYPULSE_ROLE=api` serves the gateway, dashboard and status engine; `sim` runs only
-  the simulator; `all` (default) runs both in one process.
+  the simulator; `all` (default) runs both in one process; both of those need `CITYPULSE_CITY` (see below).
 * **27 sensor types** across 12 districts: rain, light, humidity, temperature, traffic cameras, traffic lights and
   speed radars, plus wind, pressure, UV, air quality, CO₂, noise, soil moisture, water level/flow/pressure, power
   meters, street lights, gas leaks, waste bins, bridge vibration, seismic, pedestrians, bike-share, EV chargers and
@@ -29,14 +29,14 @@ It is a sample project: small enough to read in an afternoon, built to be extend
 
 ```bash
 cp .env.example .env            # then put a generated password in POSTGRES_PASSWORD
-docker compose up --build       # Postgres on 127.0.0.1:5434, app on http://127.0.0.1:8002
+docker compose up --build       # (set CITYPULSE_CITY in .env first) Postgres on 127.0.0.1:5434, app on http://127.0.0.1:8002
 docker compose logs api         # the one-time setup code is printed here
 ```
 
 Open the app, enter the setup code, choose an admin password. About half a minute later the sensors have all
 reported and the Overview shows the heatmap. Open **Burst** and press the red button.
 
-Without Docker: `pip install -e ".[dev]"`, export `DATABASE_URL`, run `citypulse start`.
+Without Docker: `pip install -e ".[dev]"`, export `DATABASE_URL` and `CITYPULSE_CITY` (or `CITYPULSE_ROLE=api`), run `citypulse start`.
 
 ## Industrial protocols and the simulator
 
@@ -50,20 +50,35 @@ here. Each reading may carry an optional `protocol` field (`http` by default, `o
 
 ## Cities
 
-Every sensor belongs to one **city**: a short id (`^[a-z0-9][a-z0-9_-]{0,31}$`, e.g. `paris`). It is optional everywhere;
-without one a sensor is in the city `default`, so existing senders and existing deployments keep working unchanged (the
-migration puts every existing sensor in `default`). A sensor's city is fixed by its first reading, like its type and
-district: a reading that names another city for a known sensor id is rejected and counted like any other bad item
-(`city does not match the sensor's city`). Sensor ids are global, so make them unique across cities (the built-in
+Every sensor belongs to one **city**: a short id (`^[a-z0-9][a-z0-9_-]{0,31}$`, e.g. `paris`). The city is **required**
+on every reading, and there is no default city. A reading without one is rejected and counted like any other bad item
+(`city is required`, JSON and OTLP alike), and so is the id `default`, which is reserved. A sensor's city is fixed by its
+first reading, like its type and district: a reading that names another city for a known sensor id is rejected and counted
+too (`city does not match the sensor's city`). Sensor ids are global, so make them unique across cities (the built-in
 simulator prefixes them with the city).
 
 * **Send it:** JSON `/api/readings` item field `"city"`; OTLP attribute `city` (or `city.id`) on the data point or the
-  resource (the data point wins); built-in simulator `CITYPULSE_CITY=paris`.
+  resource (the data point wins); built-in simulator `CITYPULSE_CITY=paris` (no default: the `sim` and `all` roles refuse to
+  start without it).
+* **Senders that omit the city** (older simulators, collectors, scripts) get their readings rejected: the response is still
+  `200 {"accepted":…,"rejected":…,"errors":["N x city is required"],"hint":"…"}`, and the `hint` lists the fix: add
+  `"city"` to every reading, set the OTLP `city` attribute (the OTLP `partialSuccess.errorMessage` carries the same
+  advice), set `CITYPULSE_CITY` on the built-in simulator, or upgrade the sender. Watch `citypulse_readings_total{result="rejected"}`
+  after the upgrade.
 * **Read it:** every read endpoint (`/api/status`, `/api/history`, `/api/sensors`, `/api/chaos`) takes an optional
   `?city=<id>`; without it you see all cities, as before. `GET /api/cities?q=<prefix>&limit=<1-200, default 50>&offset=<n>&sort=name|worst`
   lists cities (case-insensitive prefix search, paginated; `total` counts the matches) with `counts` per status, the
   city's `health` and `state` (the same tiers as the fleet), its `worst_status` and its newest reading `last_ts`.
-  `sort=worst` puts the least healthy first. Sensor rows and `/api/sensors/<id>` carry `city`.
+  `sort=worst` puts the least healthy first. A city row also has `legacy` (see below), and the page has `legacy_city`
+  (the id of the legacy city while sensors still sit in it, else `null`). Sensor rows and `/api/sensors/<id>` carry `city`.
+* **Delete it (admin only):** `DELETE /api/cities/<id>` needs the permission `city:delete`, held by the `admin` role and by
+  `full` API tokens only (operators, viewers and the narrower token scopes get `403`). It irreversibly deletes the city's
+  burst targets, readings, status history and sensors, each in transactions of at most 5000 rows (a large city never
+  locks the database; the sensors go last, so an interrupted deletion can simply be repeated), and answers
+  `{"city":"paris","deleted":{"chaos":n,"readings":n,"status_history":n,"sensors":n},"batches":n}`. `404` if no sensor
+  reports for the city, `409` if another deletion is running. Stop the city's senders first: a sender that keeps
+  reporting recreates its sensors. The dashboard has a **Delete city (Admin)** button on the Overview of a chosen city;
+  it asks you to type the city id.
 * **Pick it:** the dashboard has a searchable **City** menu (remembered in the browser). It never lists thousands of
   options: it asks the server for the first 12 matches (least healthy first, or by prefix as you type). It filters the
   Overview, Sensors and Burst tabs; with all cities shown, the Overview lists the least healthy few.
@@ -72,11 +87,31 @@ simulator prefixes them with the city).
 * **History per city:** the status engine records a health series per city every 30 s: for all cities while there are at
   most 200, otherwise for the 200 least healthy that have a problem (a city not tracked simply has no series, so its chart
   shows "collecting data"). The throughput chart of a city is computed from its readings.
-* **PagerLens:** while only `default` exists, the reporter behaves exactly as before. Once another city reports,
-  `citypulse-fleet` keeps the whole-fleet metrics but the `SensorFleetDegraded` alert is raised per city, only for cities
-  that have a problem, on service `citypulse-fleet-<city>` (depends on `citypulse-ingest`) with a `city` label. At most the 20
-  least healthy cities are tracked at once.
+* **PagerLens:** `citypulse-fleet` carries the whole-fleet metrics; the `SensorFleetDegraded` alert is raised per city (one
+  city or many behave the same), only for cities that have a problem, on service `citypulse-fleet-<city>` (depends on
+  `citypulse-ingest`) with a `city` label. At most the 20 least healthy cities are tracked at once.
 * **Metrics:** `/metrics` has no per-city label (the cardinality would be unbounded); per-city numbers are in the API.
+
+### Upgrading a deployment that has a `default` city
+
+Before cities were mandatory, readings without a city (and the built-in simulator, unless `CITYPULSE_CITY` was set) landed
+in a city called `default`. Migration `004_no_default_city.sql` deletes nothing: it only drops the column default. Existing
+sensors stay where they are, readable, and are flagged **legacy, no city reported** (`"legacy": true` in `/api/cities` and
+`/api/status?city=default`, a warning on the Overview and in the City menu). Nothing creates that city any more (the gateway
+rejects readings without a city and the explicit id `default`), the status engine no longer decommissions its silent sensors
+after 24 hours, and its raw readings still expire with `RETENTION_HOURS`. Because its sensors stop reporting once their senders
+are fixed, they go offline and would raise a city alert in PagerLens like any unhealthy city, until you purge them:
+
+1. Fix the senders (give them a real city, see above) and, for the built-in simulator, set `CITYPULSE_CITY`.
+2. As an admin, delete the junk: open the Overview, pick the city `default` (the banner has an **Open it** button), press
+   **Delete city default (Admin)** and type `default`; or call the API with an admin session or a `full` token:
+
+   ```bash
+   curl -sS -X DELETE "$CITYPULSE_URL/api/cities/default" \
+     -H "Authorization: Bearer $CITYPULSE_FULL_TOKEN" -H "X-CityPulse-CSRF: 1"
+   ```
+
+   The answer lists how many sensors, readings, history rows and burst targets were removed.
 
 ## What the status engine decides
 
@@ -94,17 +129,17 @@ Create an **ingest** token in Settings, then use any of these.
 ```bash
 curl -sS -X POST "$CITYPULSE_URL/api/readings" \
   -H "Authorization: Bearer $CITYPULSE_INGEST_TOKEN" -H "Content-Type: application/json" \
-  -d '{"readings":[{"sensor":"temperature-d01-0001","type":"temperature","district":"d01","value":21.4}]}'
+  -d '{"readings":[{"sensor":"paris.temperature-d01-0001","type":"temperature","district":"d01","city":"paris","value":21.4}]}'
 ```
 
-Bad items are rejected one by one and counted (`{"accepted":…,"rejected":…,"errors":[…]}`); the rest are stored.
+Bad items are rejected one by one and counted (`{"accepted":…,"rejected":…,"errors":[…]}`, plus a `hint` when readings lacked a city); the rest are stored.
 `ts` is optional (epoch seconds or milliseconds, or ISO 8601; up to 24 h old). **HTTP 429 with `Retry-After`** means
 the gateway is saturated: keep the batch and retry with backoff, which is what the simulator does. A sensor's type and
-district and city are fixed by its first reading. `city` is optional (default `default`), see **Cities**.
+district and city are fixed by its first reading. `city` is required on every reading, see **Cities**.
 
 **OpenTelemetry** (OTLP/HTTP, protobuf or JSON, gzip accepted) at `POST /v1/metrics`. Gauge and sum data points become
 readings. Identity comes from the attributes `sensor.id`, `sensor.type` (or a metric named after the type) and
-`district` and optionally `city` (or `city.id`), on the data point or the resource. With the OTel Collector, point an `otlphttp` exporter at the base URL
+`district` (default `d00`) and `city` (or `city.id`, required), on the data point or the resource. With the OTel Collector, point an `otlphttp` exporter at the base URL
 and map your attributes with the `attributes`/`resource` processors. (Logs and traces are not accepted here.)
 
 **The simulator as a separate process**, pushing through the same HTTP API as any collector:
@@ -152,8 +187,8 @@ CityPulse can run **standalone** (the first-run setup code and an admin password
 
 | Role | May |
 |---|---|
-| `admin` | everything, including API tokens and the admin password |
-| `operator` | see all dashboards, sensors and bursts, and start or stop bursts; no tokens, accounts or settings |
+| `admin` | everything, including API tokens, the admin password and deleting a city (`city:delete`) |
+| `operator` | see all dashboards, sensors and bursts, and start or stop bursts; no tokens, accounts, settings or city deletion |
 | `viewer` | see the dashboards, sensors and active bursts; change nothing |
 
 Services use `client_credentials` instead of a hand-copied token: scope `citypulse.ingest` pushes readings (and nothing else),
@@ -168,7 +203,7 @@ Services use `client_credentials` instead of a hand-copied token: scope `citypul
 | `CITYPULSE_ROLE` | `all` | `api`, `sim` or `all` |
 | `SIM_SENSORS` | `3000` | Simulated sensors (10 to 50,000) |
 | `SIM_SPEED` | `1` | Reporting-rate multiplier (1 to 20) |
-| `CITYPULSE_CITY` | `default` | City of the built-in simulator's sensors (ids become `<city>.<type>-<district>-<n>` unless `default`) |
+| `CITYPULSE_CITY` | – (**required** for roles `sim` and `all`) | City of the built-in simulator's sensors (ids become `<city>.<type>-<district>-<n>`). Without a valid id (`[a-z0-9][a-z0-9_-]{0,31}`, not `default`) the simulator refuses to start. Not needed for `api`. |
 | `CITYPULSE_INGEST_URL`, `CITYPULSE_INGEST_TOKEN` | – | Where the `sim` role pushes, and its token |
 | `RETENTION_HOURS` | `6` | How long raw readings are kept |
 | `MAX_SENSORS` | `50000` | Cap on auto-registered sensors (bounds abuse) |
@@ -192,7 +227,7 @@ agentpg create --name citypulse-db --size small            # note the instance i
 agentpg sandbox create citypulse \
   --image ghcr.io/<owner>/citypulse:latest \
   --instance <instance-id> --port 8000 \
-  --env CITYPULSE_ROLE=all --env SIM_SENSORS=2000
+  --env CITYPULSE_ROLE=all --env CITYPULSE_CITY=<city> --env SIM_SENSORS=2000
 agentpg sandbox status <sandbox-id>                        # prints the public HTTPS URL
 agentpg sandbox logs <sandbox-id>                          # contains the one-time setup code
 ```
@@ -210,7 +245,7 @@ make test-db                     # everything, against a throwaway database on t
 ```
 
 The suite covers validation, the simulator's behaviour under every burst, back-pressure and retry, each status
-verdict, cities (ingest with and without, mismatch, OTLP, every filter, `/api/cities`, city bursts, the upgrade from the pre-city schema, per-city alerts), token scopes (ingest cannot read, read cannot write, metrics only scrapes), OTLP in all three encodings
+verdict, cities (a missing city rejected on JSON and OTLP, mismatch, every filter, `/api/cities`, city bursts, deleting a city in chunks and who may, the upgrade from the pre-city and pre-004 schemas with legacy sensors, per-city alerts, the picker and delete-confirmation scripts under node), token scopes (ingest cannot read, read cannot write, metrics only scrapes), OTLP in all three encodings
 including a gzip bomb, `/metrics`, and the federated paths (roles, service scopes, SSO login with a mocked provider; those run with `make test-db`).
 
 ## Honest limits

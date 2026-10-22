@@ -41,7 +41,7 @@ def _db(monkeypatch):
 
 def reading(i=1, kind="temperature", district="d01", value=20.0, **extra):
     return {"sensor": f"{kind.replace('_', '-')}-{district}-{i:04d}", "type": kind, "district": district,
-            "value": value, **extra}
+            "value": value, "city": "testville", **extra}   # a city is mandatory; tests that need another one override it
 
 
 def login(client):
@@ -285,10 +285,10 @@ def test_dashboard_endpoints(client):
 
 
 # ---- OTLP -------------------------------------------------------------------------------------------
-def otlp_payload(n=3):
+def otlp_payload(n=3, city="testville"):
     return {"resourceMetrics": [{"resource": {"attributes": [
         {"key": "sensor.id", "value": {"stringValue": "temperature-d02-0007"}},
-        {"key": "district", "value": {"stringValue": "d02"}}]},
+        {"key": "district", "value": {"stringValue": "d02"}}] + ([{"key": "city", "value": {"stringValue": city}}] if city else [])},
         "scopeMetrics": [{"metrics": [{"name": "temperature", "gauge": {"dataPoints": [
             {"asDouble": 20.0 + i, "timeUnixNano": str(int((time.time() - i) * 1e9))} for i in range(n)]}}]}]}]}
 

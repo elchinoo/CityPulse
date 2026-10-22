@@ -12,11 +12,12 @@ from apgkit.config import env_bool
 from apgkit.guard import SecurityGuard
 from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, chaos, core, gateway, metrics, otlp, reporter, sim, status
+from . import __version__, chaos, core, gateway, metrics, otlp, purge, reporter, sim, status
 from .catalog import CITY_ID, DISTRICTS, GROUPS, TYPES
 from .config import get_settings
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
@@ -420,6 +421,24 @@ def list_cities(q: str = Query("", max_length=32, pattern=r"^[A-Za-z0-9_-]*$"), 
             return status.cities(conn, q, limit, offset, sort)
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc
+
+
+@app.delete("/api/cities/{city_id}", dependencies=[Depends(require("city:delete"))])
+def delete_city(city_id: str = PathParam(max_length=32, pattern=CITY_PATTERN)):
+    """Admin only. Irreversibly deletes the city with its sensors, readings, status history and burst targets, in batches of
+    at most 5000 rows (one transaction each), and reports how many of each were removed. Stop the city's senders first:
+    a sender that keeps reporting recreates its sensors. 404 if no sensor reports for the city, 409 if another deletion runs."""
+    _api_role()
+    try:
+        out = purge.delete_city(city_id)
+    except purge.NoSuchCity as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except purge.Busy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+    gateway.forget_sensor_count()
+    return out
 
 
 _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")

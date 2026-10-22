@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir .
 
 # Bind to all interfaces so a reverse proxy / sandbox can reach the app.
 # The database connection (DB_EXTERNAL_DSN or DATABASE_URL) is supplied at runtime, never baked in.
-# One image, two roles: CITYPULSE_ROLE=api | sim | all (default all).
+# One image, two roles: CITYPULSE_ROLE=api | sim | all (default all). sim and all need an explicit CITYPULSE_CITY.
 ENV HOST=0.0.0.0 \
     PORT=8000 \
     PYTHONUNBUFFERED=1

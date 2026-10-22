@@ -28,7 +28,9 @@ PERMISSIONS = {
     "city:control": "start and stop bursts (the simulated city's faults)",
     "metrics:scrape": "scrape /metrics",
     "settings:manage": "API tokens and the admin password",
+    "city:delete": "delete a city with all its sensors, readings, history and burst targets (irreversible)",
 }
+# `city:delete` is held by the wildcard only: the admin role and the `full` local scope (and the static key); no other role or scope lists it.
 ROLE_PERMISSIONS = {
     "admin": ALL,
     "operator": frozenset({"city:read", "city:control"}),

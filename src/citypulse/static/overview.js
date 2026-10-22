@@ -1,6 +1,8 @@
 import { api } from "/kit/api.js";
 import { lineChart } from "/static/charts.js";
 import { currentCity, setCity, withCity } from "/static/cities.js";
+import { deleteCityControl, LEGACY_TEXT } from "/static/citydelete.js";
+import { can } from "/kit/session.js";
 import { $, fill, h } from "/kit/ui.js";
 
 const LABEL = { operational: "All systems operational", degraded: "Degraded", partial_outage: "Partial outage", major_outage: "Major outage" };
@@ -77,11 +79,18 @@ function protocolTable(s) {
       h("td", { class: "num" }, pct(p.ok / p.total)), h("td", {}, bar(p.ok / p.total)))))));
 }
 
+// A deployment upgraded from before cities were mandatory may still hold sensors in the retired city. Say so, and offer the way out.
+function legacyNotice(id, scoped) {
+  const del = can("city:delete") && scoped ? deleteCityControl(id, { onDone: () => setCity("") }) : null;
+  return h("div", { class: "banner warn legacy-banner" }, h("strong", {}, `City ${id}: ${LEGACY_TEXT}. `),
+    "These sensors were stored before every reading had to name its city; nothing creates this city any more, and it is never removed automatically. ",
+    scoped ? (can("city:delete") ? "Delete it once you no longer need this data." : "Ask an administrator to delete it once the data is no longer needed.")
+      : h("button", { class: "secondary small", type: "button", onclick: () => setCity(id) }, "Open it"), del);
+}
+
 // With several cities, the least healthy few (a click selects one); never the whole list.
-async function worstCities() {
-  let out;
-  try { out = await api("/api/cities?sort=worst&limit=8"); } catch { return null; }
-  if (out.total < 2) return null;
+function worstCities(out) {
+  if (!out || out.total < 2) return null;
   const rows = out.cities.filter((c) => c.counts.ok < c.total);
   return h("div", { class: "card flush" }, h("div", { class: "row pad" }, h("h2", { class: "section-title" }, "Cities needing attention"),
     h("span", { class: "muted" }, `${out.total.toLocaleString()} cities; pick one in the City menu to drill in`)),
@@ -100,7 +109,10 @@ async function render(box) {
     return;
   }
   if (scoped !== currentCity()) return;                          // the city changed while loading: a newer render is on its way
-  const cities = scoped ? null : await worstCities();
+  let list = null;
+  if (!scoped) { try { list = await api("/api/cities?sort=worst&limit=8"); } catch { /* the rest of the page still shows */ } }
+  const cities = worstCities(list);
+  const legacy = scoped ? (s.legacy ? legacyNotice(scoped, true) : null) : (list && list.legacy_city ? legacyNotice(list.legacy_city, false) : null);
   const burst = s.bursts.length ? h("div", { class: "banner" }, h("strong", {}, "Burst active: "),
     s.bursts.map((b) => `${b.kind} on ${b.target} (level ${b.intensity}, ${b.seconds_left}s left)`).join(" · ")) : null;
   const health = hist.health.map((r) => [r.ts, r.total ? (100 * r.ok) / r.total : 100]);
@@ -110,10 +122,12 @@ async function render(box) {
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Readings per 30 s (by event time)"), lineChart(flow, { label: "Readings per 30 seconds" })));
   if (!s.total) {
     if (scoped) { fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, `No sensors have reported for city ${scoped}.`))); return; }
+    if (legacy) { fill(box, legacy); return; }
     fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, "No sensors have reported yet. The simulator starts on its own in the 'all' role; give it half a minute, or see Connect to send real readings.")));
     return;
   }
-  fill(box, burst, scoped ? h("p", { class: "muted" }, "Showing city ", h("span", { class: "scope-chip" }, scoped), ". Use the City menu to switch.") : null,
+  const remove = scoped && !s.legacy && can("city:delete") ? deleteCityControl(scoped, { total: s.total, onDone: () => setCity("") }) : null;
+  fill(box, burst, legacy, scoped ? h("div", { class: "row" }, h("p", { class: "muted" }, "Showing city ", h("span", { class: "scope-chip" }, scoped), ". Use the City menu to switch."), remove) : null,
     banner(s), kpis(s), cities, heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
     s.protocols && s.protocols.length > 1 ? h("h2", { class: "section-title" }, "By collection protocol") : null, protocolTable(s));
 }

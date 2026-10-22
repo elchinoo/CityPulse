@@ -5,7 +5,7 @@ Identity comes from attributes, data point first, then resource:
   sensor.id    the sensor's id (required)
   sensor.type  a catalogue key such as `temperature`; if absent, the metric name is used when it is a key
   district     district id (default `d00`)
-  city         city id (optional, default `default`); `city.id` is accepted as an alias. The data point wins over the resource.
+  city         city id (required: a data point without one is rejected); `city.id` is accepted as an alias. The data point wins over the resource.
 The OTel Collector can map any existing attribute to these with its `attributes`/`resource` processors.
 """
 import json
@@ -20,6 +20,7 @@ from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
 
 from . import gateway
 from .catalog import TYPES
+from .gateway import CITY_HINT_OTLP
 
 MAX_DECOMPRESSED = 8 * 1024 * 1024
 
@@ -123,7 +124,7 @@ def store(data: dict) -> tuple[int, int, str]:
         res = gateway.accept(items[i:i + gateway.MAX_BATCH])
         accepted += res["accepted"]
         rejected += res["rejected"]
-        note = note or "; ".join(res["errors"])
+        note = note or "; ".join(res["errors"] + ([CITY_HINT_OTLP] if "hint" in res else []))
     if skipped:
         note = (note + "; " if note else "") + f"{skipped} data points had no sensor.id / sensor.type"
     return accepted, rejected + skipped, note

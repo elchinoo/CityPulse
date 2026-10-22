@@ -17,8 +17,8 @@ import httpx
 
 from . import chaos, gateway, metrics
 from . import settings_store as store
-from .catalog import DEFAULT_CITY, TYPES, build_fleet, hash_str
-from .config import get_settings
+from .catalog import TYPES, build_fleet, hash_str
+from .config import get_settings, require_sim_city
 from .db import connect
 
 BATCH = 100
@@ -74,7 +74,7 @@ class HttpSink:
 class Sensor:
     __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member")
 
-    def __init__(self, sid: str, kind: str, district: str, rng: random.Random, city: str = DEFAULT_CITY):
+    def __init__(self, sid: str, kind: str, district: str, rng: random.Random, city: str):
         t = TYPES[kind]
         self.id, self.type, self.district, self.city = sid, kind, district, city
         self.bias = rng.gauss(0, t.sigma * 0.5) if t.sigma else 0.0
@@ -94,7 +94,7 @@ def _reflect(v: float, lo: float, hi: float) -> float:
 
 
 class Simulator:
-    def __init__(self, n: int, speed: float, sink, bursts, rng: random.Random | None = None, city: str = DEFAULT_CITY):
+    def __init__(self, n: int, speed: float, sink, bursts, rng: random.Random | None = None, *, city: str):
         self.rng = rng or random.Random()
         self.speed = speed
         self.sink = sink
@@ -148,10 +148,8 @@ class Simulator:
         else:
             s.frozen = None
             v = self.value(s, now, 1 + 2 * noise, 0.04 * noise)
-        item = {"sensor": s.id, "type": s.type, "district": s.district, "value": v,
+        item = {"sensor": s.id, "type": s.type, "district": s.district, "city": s.city, "value": v,
                 "ts": round(now - 90 * late, 3)}
-        if s.city != DEFAULT_CITY:
-            item["city"] = s.city
         if corrupt and self.rng.random() < 0.08 * corrupt:
             item = self._corrupt(item)
         return item
@@ -272,6 +270,7 @@ def heartbeat(conn) -> dict | None:
 
 def make(direct: bool) -> Simulator:
     cfg = get_settings()
+    require_sim_city(cfg)
     if direct:
         sink = DirectSink()
     else:

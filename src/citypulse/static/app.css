@@ -118,3 +118,7 @@ button.burst:hover { filter: brightness(1.08); }
 .city-name { overflow-wrap: anywhere; }
 .city-note { margin: .4rem .2rem 0; }
 .scope-chip { font-weight: 600; color: var(--brand); }
+.legacy-tag { color: var(--warn); font-weight: 600; }
+.banner.warn.legacy-banner { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
+.city-delete-panel { margin: .5rem 0; max-width: 40rem; }
+.city-delete-panel input { width: 100%; box-sizing: border-box; margin: .4rem 0; }

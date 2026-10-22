@@ -20,7 +20,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--readings", type=int, default=200_000)
     ap.add_argument("--sensors", type=int, default=5000)
-    ap.add_argument("--cities", type=int, default=0, help="0 = send no city field (old senders)")
+    ap.add_argument("--cities", type=int, default=1, help="how many cities the sensors are spread over (a city is required)")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--runs", type=int, default=3)
     a = ap.parse_args()
@@ -37,12 +37,8 @@ def main() -> None:
             items = []
             for i in range(1000):
                 n = (b * 1000 + i) % a.sensors
-                item = {"sensor": f"temperature-{n:05d}", "type": "temperature", "district": f"d{n % 12:02d}",
-                        "value": 20.0 + (i % 7) / 10}
-                if a.cities:
-                    item["sensor"] = f"temperature-c{n % a.cities}-{n:05d}"
-                    item["city"] = f"city{n % a.cities}"
-                items.append(item)
+                items.append({"sensor": f"temperature-c{n % a.cities}-{n:05d}", "type": "temperature", "district": f"d{n % 12:02d}",
+                              "city": f"city{n % a.cities}", "value": 20.0 + (i % 7) / 10})
             batches.append(items)
         t = time.perf_counter()
         with ThreadPoolExecutor(a.threads) as ex:

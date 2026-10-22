@@ -17,7 +17,7 @@ import time
 import psycopg
 
 from . import chaos
-from .catalog import DISTRICTS, TYPES
+from .catalog import DISTRICTS, LEGACY_CITY, TYPES
 from .config import get_settings
 from .db import connect
 
@@ -106,7 +106,7 @@ def summary(conn, city: str | None = None) -> dict:
             reasons.append(f"{t['label']}: {round(100 * t['ok'] / t['total'])}% healthy")
     if total and health < 0.97:
         reasons.insert(0, f"fleet is {round(100 * health, 1)}% healthy ({total - counts['ok']} of {total} sensors have a problem)")
-    return {"city": city, "state": overall, "health": health, "total": total, "counts": counts, "types": by_type,
+    return {"city": city, "legacy": city == LEGACY_CITY, "state": overall, "health": health, "total": total, "counts": counts, "types": by_type,
             "districts": by_district, "protocols": by_protocol, "matrix": list(matrix.values()), "reasons": reasons[:8]}
 
 
@@ -138,7 +138,7 @@ def _city_row(r: dict) -> dict:
     ratio = r["ok"] / r["total"] if r["total"] else 1.0
     worst = next((k for k in SEVERITY_ORDER if r[k]), "ok")
     return {"city": r["city"], "total": r["total"], "counts": {k: r[k] for k in STATUSES}, "health": ratio,
-            "state": tier(ratio), "worst_status": worst, "last_ts": r["last_ts"]}
+            "state": tier(ratio), "worst_status": worst, "last_ts": r["last_ts"], "legacy": r["city"] == LEGACY_CITY}
 
 
 def _city_query(where: str, order: str, having: str = "") -> str:
@@ -149,21 +149,24 @@ def _city_query(where: str, order: str, having: str = "") -> str:
 
 def cities(conn, q: str = "", limit: int = 50, offset: int = 0, sort: str = "name") -> dict:
     """One page of cities with sensor counts per status, the city's own tier, its worst sensor status and its newest
-    reading time. `q` is a case-insensitive prefix; `sort` is 'name' or 'worst' (least healthy first)."""
+    reading time; `legacy` marks the retired city 'default'. `legacy_city` names it while sensors still sit in it (else null),
+    whatever the page shows. `q` is a case-insensitive prefix; `sort` is 'name' or 'worst' (least healthy first)."""
     pattern = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     rows = conn.execute(_city_query("WHERE city LIKE %s", CITY_SORTS[sort]), (pattern, limit, offset)).fetchall()
     total = rows[0]["n_cities"] if rows else (0 if offset == 0 else conn.execute(
         "SELECT count(DISTINCT city) AS n FROM sensor WHERE city LIKE %s", (pattern,)).fetchone()["n"])
-    return {"total": total, "limit": limit, "offset": offset, "cities": [_city_row(r) for r in rows]}
+    legacy = conn.execute("SELECT 1 FROM sensor WHERE city = %s LIMIT 1", (LEGACY_CITY,)).fetchone()
+    return {"total": total, "limit": limit, "offset": offset, "legacy_city": LEGACY_CITY if legacy else None,
+            "cities": [_city_row(r) for r in rows]}
 
 
 def problem_cities(conn, limit: int = 20) -> dict:
-    """For the PagerLens reporter: how many cities exist, whether only 'default' does, and the `limit` least healthy
-    cities that have at least one sensor with a problem."""
-    head = conn.execute("SELECT count(DISTINCT city) AS n, coalesce(bool_and(city = 'default'), true) AS only_default FROM sensor").fetchone()
+    """For the PagerLens reporter: how many cities exist and the `limit` least healthy cities that have at least one
+    sensor with a problem."""
+    head = conn.execute("SELECT count(DISTINCT city) AS n FROM sensor").fetchone()
     rows = conn.execute(_city_query("", CITY_SORTS["worst"], "HAVING count(*) FILTER (WHERE status <> 'ok') > 0"),
                         (limit, 0)).fetchall()
-    return {"count": head["n"], "only_default": head["only_default"], "problems": [r["city"] for r in rows]}
+    return {"count": head["n"], "problems": [r["city"] for r in rows]}
 
 
 def snapshot_history(conn, s: dict) -> None:
@@ -188,7 +191,8 @@ def prune(conn) -> None:
             (hours,)).rowcount >= 50000:
         conn.commit()
     conn.execute("DELETE FROM status_history WHERE ts < now() - %s * interval '1 hour'", (hours,))
-    conn.execute("DELETE FROM sensor WHERE last_ts < now() - interval '24 hours'")  # decommissioned
+    # Decommissioned sensors go after 24 h silent, except a legacy city's: those wait for an admin to delete the city.
+    conn.execute("DELETE FROM sensor WHERE last_ts < now() - interval '24 hours' AND city <> %s", (LEGACY_CITY,))
     chaos.prune(conn)
 
 

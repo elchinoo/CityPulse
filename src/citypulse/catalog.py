@@ -16,7 +16,9 @@ DISTRICTS: dict[str, str] = {
 SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 DISTRICT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
 CITY_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-DEFAULT_CITY = "default"
+# Before cities were mandatory, readings without a city were stored under this id. It is no longer accepted anywhere:
+# it only survives so that sensors of an upgraded database stay readable (and are flagged "legacy") until an admin deletes them.
+LEGACY_CITY = "default"
 
 
 @dataclass(frozen=True)
@@ -81,9 +83,9 @@ assert len(TYPES) == 27
 GROUPS = ["weather", "traffic", "environment", "utilities", "structures"]
 
 
-def build_fleet(n: int, city: str = DEFAULT_CITY) -> list[tuple[str, str, str]]:
+def build_fleet(n: int, city: str) -> list[tuple[str, str, str]]:
     """Deterministic fleet of `n` sensors as (id, type, district), spread by weight and round-robin over districts.
-    Sensor ids are global, so a non-default city is part of the id (`<city>.<type>-<district>-<n>`, at most 64 characters)."""
+    Sensor ids are global, so the city is part of the id (`<city>.<type>-<district>-<n>`, at most 64 characters)."""
     total = sum(t.weight for t in _T)
     counts = {t.key: max(1, round(n * t.weight / total)) for t in _T}
     districts = list(DISTRICTS)
@@ -92,7 +94,7 @@ def build_fleet(n: int, city: str = DEFAULT_CITY) -> list[tuple[str, str, str]]:
         for i in range(counts[t.key]):
             d = districts[(i + hash_str(t.key)) % len(districts)]
             sid = f"{t.key.replace('_', '-')}-{d}-{i:04d}"
-            fleet.append((sid if city == DEFAULT_CITY else f"{city}.{sid}", t.key, d))
+            fleet.append((f"{city}.{sid}", t.key, d))
     return fleet
 
 

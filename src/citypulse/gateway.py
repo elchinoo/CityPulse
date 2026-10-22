@@ -13,7 +13,7 @@ import psycopg
 from psycopg_pool import PoolTimeout
 
 from . import chaos, metrics
-from .catalog import CITY_ID, DEFAULT_CITY, DISTRICT_ID, SENSOR_ID, TYPES
+from .catalog import CITY_ID, DISTRICT_ID, LEGACY_CITY, SENSOR_ID, TYPES
 from .config import get_settings
 from .db import connect, pool
 
@@ -39,6 +39,12 @@ _inflight = 0
 _bursts = chaos.Cache(lambda: _load_bursts())
 _known = {"count": 0, "at": 0.0}
 MISMATCH = "city does not match the sensor's city"
+CITY_REQUIRED = "city is required"
+CITY_RESERVED = f"city {LEGACY_CITY!r} is reserved (legacy); use a real city id"
+CITY_HINT = ('Every reading needs a "city" (a-z, 0-9, _ and -, up to 32 characters, e.g. "paris"). Fix: add "city": "<id>" to each '
+             'reading (JSON); set the OTLP attribute city (resource or data point); built-in simulator: set CITYPULSE_CITY; '
+             "the CityPulse Simulator or another sender: upgrade it or configure its city. See the Connect page.")
+CITY_HINT_OTLP = "fix: set the OTLP attribute city on the resource or data point"
 
 
 def _load_bursts() -> list[dict]:
@@ -86,7 +92,7 @@ def parse_ts(value, now: datetime) -> datetime:
 
 def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, str] | str:
     """A cleaned (sensor, type, district, ts, value, protocol, city) tuple, or the reason it was rejected.
-    `city` is optional and defaults to 'default'."""
+    `city` is required: there is no default city."""
     if not isinstance(item, dict):
         return "item is not an object"
     sensor, kind, district = item.get("sensor"), item.get("type"), item.get("district")
@@ -98,9 +104,11 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, 
         return "bad district"
     city = item.get("city")
     if city is None:
-        city = DEFAULT_CITY
-    elif not isinstance(city, str) or not CITY_ID.match(city):
+        return CITY_REQUIRED
+    if not isinstance(city, str) or not CITY_ID.match(city):
         return "bad city"
+    if city == LEGACY_CITY:
+        return CITY_RESERVED
     protocol = item.get("protocol", "http")
     if protocol not in PROTOCOLS:
         return "unknown protocol"
@@ -118,7 +126,8 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, 
 
 
 def accept(items: list) -> dict:
-    """Validate and store a batch. Returns {"accepted", "rejected", "errors"}."""
+    """Validate and store a batch. Returns {"accepted", "rejected", "errors"}, plus "hint" (how to fix the sender) when
+    readings were rejected for lacking a city."""
     if not isinstance(items, list) or not items:
         raise BadBatch("send a non-empty list of readings")
     if len(items) > MAX_BATCH:
@@ -162,8 +171,11 @@ def accept(items: list) -> dict:
         metrics.READINGS.labels("late").inc(late)
     metrics.BATCHES.labels("ok").inc()
     metrics.BATCH_SECONDS.observe(time.perf_counter() - started)
-    return {"accepted": accepted, "rejected": rejected,
-            "errors": [f"{n} x {msg}" for msg, n in sorted(errors.items(), key=lambda kv: -kv[1])[:5]]}
+    out = {"accepted": accepted, "rejected": rejected,
+           "errors": [f"{n} x {msg}" for msg, n in sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]}
+    if CITY_REQUIRED in errors:
+        out["hint"] = CITY_HINT
+    return out
 
 
 def _store(good: list, errors: dict) -> int:
@@ -220,6 +232,11 @@ def _store(good: list, errors: dict) -> int:
     except PoolTimeout as exc:
         raise Overloaded("database connections are exhausted") from exc
     return refused
+
+
+def forget_sensor_count() -> None:
+    """The sensor cap uses a cached count; call after sensors were deleted in bulk."""
+    _known["at"] = 0.0
 
 
 def _sensor_count(conn) -> int:

@@ -19,7 +19,7 @@ from citypulse.db import connect  # noqa: E402
 ISS, AUD = "https://id.example.org", "citypulse"
 KEY = RSAKey.generate_key(2048, {"kid": "k1", "use": "sig", "alg": "RS256"})
 CSRF = {"X-CityPulse-CSRF": "1"}
-READING = {"readings": [{"sensor": "temperature-d01-0001", "type": "temperature", "district": "d01", "value": 20.0}]}
+READING = {"readings": [{"sensor": "temperature-d01-0001", "type": "temperature", "district": "d01", "city": "oslo", "value": 20.0}]}
 
 
 class Provider:
@@ -97,6 +97,18 @@ def test_roles_decide_what_a_person_may_do(client):
     assert client.get("/metrics", headers=operator).status_code == 403                       # scraping is a service permission
     assert client.post("/api/readings", headers=operator, json=READING).status_code == 403   # nor do people push readings
     assert client.get("/metrics", headers=admin).status_code == 200
+
+
+def test_only_admins_may_delete_a_city(client):
+    admin, operator = access(sub="usr_3", roles=["citypulse:admin"]), access(roles=["citypulse:operator"])
+    viewer, stranger = access(sub="usr_2", roles=["citypulse:viewer"]), access(sub="usr_4", roles=["otherapp:admin"])
+    assert client.post("/api/readings", headers=service("citypulse.ingest"), json=READING).json()["accepted"] == 1
+    for who in (operator, viewer, stranger, service("citypulse.ingest"), service("citypulse.read"), service("citypulse.metrics")):
+        assert client.delete("/api/cities/oslo", headers={**who, **CSRF}).status_code == 403
+    with connect() as c:
+        assert c.execute("SELECT count(*) AS n FROM sensor").fetchone()["n"] == 1             # nothing was deleted
+    r = client.delete("/api/cities/oslo", headers={**admin, **CSRF})
+    assert r.status_code == 200 and r.json()["deleted"]["sensors"] == 1
 
 
 def test_service_scopes_are_each_narrow(client):

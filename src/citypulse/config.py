@@ -9,7 +9,7 @@ class Settings:
     database_url: str
     role: str                 # api | sim | all
     sim_sensors: int
-    sim_city: str             # the city the built-in simulator's sensors belong to
+    sim_city: str             # the city the built-in simulator's sensors belong to; '' = not set (the simulator then refuses to start)
     sim_speed: float          # 1.0 = real intervals; 5.0 = every sensor reports 5x as often
     ingest_url: str           # sim role: where to POST readings (api role is reached over HTTP)
     ingest_token: str
@@ -39,11 +39,22 @@ def _float(name: str, default: float, lo: float, hi: float) -> float:
 
 
 def _city() -> str:
-    from .catalog import CITY_ID, DEFAULT_CITY
-    city = os.environ.get("CITYPULSE_CITY", "").strip() or DEFAULT_CITY
-    if not CITY_ID.match(city):
+    """CITYPULSE_CITY has no default: '' when unset, SystemExit when set to something that is not a usable city id."""
+    from .catalog import CITY_ID, LEGACY_CITY
+    city = os.environ.get("CITYPULSE_CITY", "").strip()
+    if city and not CITY_ID.match(city):
         raise SystemExit("CITYPULSE_CITY must match [a-z0-9][a-z0-9_-]{0,31}")
+    if city == LEGACY_CITY:
+        raise SystemExit(f"CITYPULSE_CITY={LEGACY_CITY} is the retired legacy city and is rejected by the gateway; choose a real city id")
     return city
+
+
+def require_sim_city(cfg: "Settings") -> None:
+    """The built-in simulator (role sim or all) must be told which city it simulates."""
+    if not cfg.sim_city:
+        raise SystemExit("the built-in simulator (CITYPULSE_ROLE=sim or all) needs an explicit CITYPULSE_CITY, "
+                         "e.g. CITYPULSE_CITY=paris (a-z, 0-9, _ and -, up to 32 characters); "
+                         "use CITYPULSE_ROLE=api to run without a simulator")
 
 
 def get_settings() -> Settings:
