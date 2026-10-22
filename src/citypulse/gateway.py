@@ -13,7 +13,7 @@ import psycopg
 from psycopg_pool import PoolTimeout
 
 from . import chaos, metrics
-from .catalog import DISTRICT_ID, SENSOR_ID, TYPES
+from .catalog import CITY_ID, DEFAULT_CITY, DISTRICT_ID, SENSOR_ID, TYPES
 from .config import get_settings
 from .db import connect, pool
 
@@ -38,6 +38,7 @@ _slots_lock = threading.Lock()
 _inflight = 0
 _bursts = chaos.Cache(lambda: _load_bursts())
 _known = {"count": 0, "at": 0.0}
+MISMATCH = "city does not match the sensor's city"
 
 
 def _load_bursts() -> list[dict]:
@@ -83,8 +84,9 @@ def parse_ts(value, now: datetime) -> datetime:
     return min(ts, now)
 
 
-def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str] | str:
-    """A cleaned (sensor, type, district, ts, value, protocol) tuple, or the reason it was rejected."""
+def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, str] | str:
+    """A cleaned (sensor, type, district, ts, value, protocol, city) tuple, or the reason it was rejected.
+    `city` is optional and defaults to 'default'."""
     if not isinstance(item, dict):
         return "item is not an object"
     sensor, kind, district = item.get("sensor"), item.get("type"), item.get("district")
@@ -94,6 +96,11 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str] 
         return "unknown sensor type"
     if not isinstance(district, str) or not DISTRICT_ID.match(district):
         return "bad district"
+    city = item.get("city")
+    if city is None:
+        city = DEFAULT_CITY
+    elif not isinstance(city, str) or not CITY_ID.match(city):
+        return "bad city"
     protocol = item.get("protocol", "http")
     if protocol not in PROTOCOLS:
         return "unknown protocol"
@@ -107,7 +114,7 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str] 
         ts = parse_ts(item.get("ts"), now)
     except ValueError as exc:
         return str(exc)
-    return sensor, kind, district, ts, value, protocol
+    return sensor, kind, district, ts, value, protocol, city
 
 
 def accept(items: list) -> dict:
@@ -160,23 +167,33 @@ def accept(items: list) -> dict:
 
 
 def _store(good: list, errors: dict) -> int:
-    """Write the batch. Returns how many extra items were refused (sensor cap)."""
-    latest = {}
-    for g in good:  # one row per sensor for the state upsert: the newest event time wins
-        cur = latest.get(g[0])
-        if cur is None or g[3] >= cur[3]:
-            latest[g[0]] = g
+    """Write the batch. Returns how many extra items were refused (city mismatch, sensor cap)."""
     refused = 0
     try:
         with pool().connection(timeout=3) as conn:
-            known = {r["id"] for r in conn.execute("SELECT id FROM sensor WHERE id = ANY(%s)", ([*latest],))}
-            new = [s for s in latest if s not in known]
+            existing = {r["id"]: r["city"] for r in
+                        conn.execute("SELECT id, city FROM sensor WHERE id = ANY(%s)", ([*{g[0] for g in good}],))}
+            city_of = dict(existing)
+            latest, mismatched = {}, 0
+            for g in good:  # one row per sensor for the state upsert: the newest event time wins
+                if city_of.setdefault(g[0], g[6]) != g[6]:   # a sensor's city is fixed by its first reading (also within one batch)
+                    mismatched += 1
+                    continue
+                cur = latest.get(g[0])
+                if cur is None or g[3] >= cur[3]:
+                    latest[g[0]] = g
+            if mismatched:
+                refused += mismatched
+                errors[MISMATCH] = errors.get(MISMATCH, 0) + mismatched
+                good = [g for g in good if city_of[g[0]] == g[6]]
+            new = [s for s in latest if s not in existing]
             if new:
                 room = max(0, get_settings().max_sensors - _sensor_count(conn))
                 if len(new) > room:
                     drop = set(new[room:])
-                    refused = sum(1 for g in good if g[0] in drop)
-                    errors["sensor limit reached"] = errors.get("sensor limit reached", 0) + refused
+                    capped = sum(1 for g in good if g[0] in drop)
+                    refused += capped
+                    errors["sensor limit reached"] = errors.get("sensor limit reached", 0) + capped
                     good = [g for g in good if g[0] not in drop]
                     latest = {k: v for k, v in latest.items() if k not in drop}
             if good:
@@ -184,14 +201,22 @@ def _store(good: list, errors: dict) -> int:
                     "INSERT INTO reading (sensor_id, ts, value) SELECT * FROM unnest(%s::text[], %s::timestamptz[], %s::float8[])",
                     ([g[0] for g in good], [g[3] for g in good], [g[4] for g in good]))
                 rows = list(latest.values())
-                conn.execute(
-                    "INSERT INTO sensor (id, type, district, last_ts, last_value, protocol) "
-                    "SELECT * FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]) "
+                cities = sorted({r[6] for r in rows})
+                head, tail = "INSERT INTO sensor (id, type, district, last_ts, last_value, protocol, city) ", (
                     "ON CONFLICT (id) DO UPDATE SET "
                     " last_value = CASE WHEN EXCLUDED.last_ts >= sensor.last_ts THEN EXCLUDED.last_value ELSE sensor.last_value END, "
-                    " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()",
-                    ([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows],
-                     [r[3] for r in rows], [r[4] for r in rows], [r[5] for r in rows]))
+                    " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()")
+                cols = [[r[k] for r in rows] for k in range(6)]
+                if len(cities) == 1:   # the usual batch: one city, passed as a scalar
+                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, %s::text "
+                                 "FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]) "
+                                 "AS u(id, type, district, ts, val, proto) " + tail, (cities[0], *cols))
+                else:                  # several cities: a small dictionary plus an int index per row
+                    index = {c: i + 1 for i, c in enumerate(cities)}
+                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, (%s::text[])[u.ci] "
+                                 "FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[], %s::int[]) "
+                                 "AS u(id, type, district, ts, val, proto, ci) " + tail,
+                                 (cities, *cols, [index[r[6]] for r in rows]))
     except PoolTimeout as exc:
         raise Overloaded("database connections are exhausted") from exc
     return refused

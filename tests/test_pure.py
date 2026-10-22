@@ -56,8 +56,8 @@ def test_validate_rejects_with_a_reason(patch, reason):
 
 def test_validate_accepts_and_normalises():
     now = datetime.now(UTC)
-    sensor, kind, district, ts, value, protocol = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
-    assert (sensor, kind, district, value, protocol) == ("temp-d01-0001", "temperature", "d01", 21.5, "http")
+    sensor, kind, district, ts, value, protocol, city = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
+    assert (sensor, kind, district, value, protocol, city) == ("temp-d01-0001", "temperature", "d01", 21.5, "http", "default")
     assert 3 < (now - ts).total_seconds() < 9            # milliseconds epoch understood
     assert gateway.validate("not a dict", NOW) == "item is not an object"
     # a value past the physical limits is VALID input (it becomes a fault later), not a rejection
@@ -91,8 +91,8 @@ class _Sink:
         self.sent.append(readings)
 
 
-def _sim(n=300, sink=None, bursts=None, seed=1):
-    return Simulator(n, 1.0, sink or _Sink(), lambda: bursts or [], random.Random(seed))
+def _sim(n=300, sink=None, bursts=None, seed=1, city="default"):
+    return Simulator(n, 1.0, sink or _Sink(), lambda: bursts or [], random.Random(seed), city=city)
 
 
 def test_normal_readings_pass_validation_and_stay_within_limits():
@@ -244,3 +244,133 @@ def test_a_static_pagerlens_token_wins_over_the_identity_provider(monkeypatch):
     monkeypatch.delenv("CITYPULSE_SERVICE_CLIENT_SECRET")
     monkeypatch.setenv("CITYPULSE_SERVICE_CLIENT_SECRET_FILE", "/nonexistent/secret")
     assert reporter.maybe_start() is None
+
+
+# ---- cities -------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("city", ["paris", "a", "0-x_y", "x" * 32])
+def test_validate_accepts_a_city(city):
+    out = gateway.validate({**GOOD, "city": city}, NOW)
+    assert isinstance(out, tuple) and out[6] == city
+
+
+@pytest.mark.parametrize("city", ["", "Paris", "-x", "x" * 33, "a b", "a.b", 5, True, ["a"], {"a": 1}])
+def test_validate_rejects_a_bad_city(city):
+    assert gateway.validate({**GOOD, "city": city}, NOW) == "bad city"
+
+
+def test_a_missing_or_null_city_is_the_default_city():
+    assert gateway.validate(GOOD, NOW)[6] == "default"
+    assert gateway.validate({**GOOD, "city": None}, NOW)[6] == "default"
+
+
+def test_city_targets_for_bursts():
+    b = chaos.Burst("noise", "city:paris", 3)
+    assert b.matches("rain", "d01", "paris") and not b.matches("rain", "d01", "rome") and not b.matches("rain", "d01")
+    assert chaos.Burst("noise", "all", 1).matches("co2", "d01", "rome")
+    assert chaos.Burst("noise", "district:d03", 1).matches("rain", "d03", "rome")       # existing targets span every city
+    assert chaos.check_target("city:paris") == "city:paris" and chaos.check_target("city:a_b-9") == "city:a_b-9"
+    for bad in ("city:", "city:Paris", "city:" + "x" * 33, "city:a b", "city:-a", "cities:paris"):
+        with pytest.raises(chaos.ChaosError):
+            chaos.check_target(bad)
+
+
+def test_the_simulator_sends_its_city_and_keeps_ids_unique_across_cities():
+    plain, paris, rome = _sim(), _sim(city="paris"), _sim(city="rome")
+    item = plain.read(plain.sensors[0], time.time(), [])
+    assert "city" not in item                                                             # default city: payload as before
+    p = paris.read(paris.sensors[0], time.time(), [])
+    assert p["city"] == "paris" and p["sensor"].startswith("paris.") and isinstance(gateway.validate(p, NOW), tuple)
+    assert {s.id for s in paris.sensors}.isdisjoint({s.id for s in rome.sensors}) and len(paris.sensors) == len(plain.sensors)
+    assert all(SENSOR_ID.match(f[0]) for f in build_fleet(50_000, "x" * 32))
+    burst = [chaos.Burst("dropout", "city:rome", 5)]
+    assert paris.read(paris.sensors[0], time.time(), burst) is not None
+    assert rome.read(rome.sensors[0], time.time(), burst) is None
+
+
+def test_citypulse_city_setting(monkeypatch):
+    from citypulse.config import get_settings
+    monkeypatch.delenv("CITYPULSE_CITY", raising=False)
+    assert get_settings().sim_city == "default"
+    monkeypatch.setenv("CITYPULSE_CITY", "oslo")
+    assert get_settings().sim_city == "oslo"
+    monkeypatch.setenv("CITYPULSE_CITY", "Not Valid")
+    with pytest.raises(SystemExit):
+        get_settings()
+
+
+def test_otlp_maps_the_city_attribute():
+    from citypulse import otlp
+
+    def payload(res, point):
+        a = lambda d: [{"key": k, "value": {"stringValue": v}} for k, v in d.items()]  # noqa: E731
+        return {"resourceMetrics": [{"resource": {"attributes": a({"sensor.id": "temp-d01-0001", **res})},
+                "scopeMetrics": [{"metrics": [{"name": "temperature", "gauge": {"dataPoints": [{"asDouble": 1.0, "attributes": a(point)}]}}]}]}]}
+    for res, point, want in [({}, {}, None), ({"city": "a"}, {}, "a"), ({"city.id": "b"}, {}, "b"), ({}, {"city.id": "c"}, "c"),
+                             ({"city": "a"}, {"city": "d"}, "d"), ({"city": "a"}, {"city.id": "e"}, "e"), ({"city": ""}, {}, None)]:
+        items, skipped = otlp.to_readings(payload(res, point))
+        assert skipped == 0 and items[0].get("city") == want, (res, point)
+
+
+# ---- the reporter, per city -------------------------------------------------------------------------------
+def _summary(city, ok, total, state):
+    bad = total - ok
+    return {"city": city, "state": state, "health": ok / total, "total": total, "reasons": [f"{bad} sensors down"],
+            "counts": {"ok": ok, "stale": 0, "offline": bad, "fault": 0, "stuck": 0},
+            "districts": [{"total": total, "ok": ok}]}
+
+
+def _run_reporter(monkeypatch, snaps):
+    posts: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append((request.url.path, __import__("json").loads(request.content)))
+        return httpx.Response(200, json={})
+    rep = reporter.Reporter("http://pagerlens.test", "t", transport=httpx.MockTransport(handler))
+    feed = iter(snaps)
+    monkeypatch.setattr(reporter, "_snapshot", lambda tracked=frozenset(): next(feed))
+    return rep, posts
+
+
+def _of(posts, path, key="service"):
+    return [(b[key], b) for p, b in posts if p == path]
+
+
+def test_reporter_with_only_the_default_city_behaves_as_before(monkeypatch):
+    bad = {"overall": _summary(None, 50, 100, "partial_outage"), "multi": False, "cities": {}}
+    rep, posts = _run_reporter(monkeypatch, [bad])
+    asyncio.run(rep.report())
+    alerts = _of(posts, "/api/ingest/alerts")
+    assert [a[0] for a in alerts] == ["citypulse-fleet"] and "city" not in alerts[0][1]["labels"]
+    assert {s for s, _ in _of(posts, "/api/ingest/services", "name")} == {"citypulse-ingest", "citypulse-fleet"}
+    assert [s for s, _ in _of(posts, "/api/ingest/metrics")] == ["citypulse-ingest", "citypulse-fleet"]
+
+
+def test_reporter_alerts_per_city_and_only_for_cities_with_problems(monkeypatch):
+    overall = _summary(None, 70, 100, "degraded")
+    snap = {"overall": overall, "multi": True, "cities": {"paris": _summary("paris", 5, 10, "partial_outage")}}
+    rep, posts = _run_reporter(monkeypatch, [snap, snap])
+    asyncio.run(rep.report())
+    alerts = _of(posts, "/api/ingest/alerts")
+    assert [a[0] for a in alerts] == ["citypulse-fleet-paris"]                      # no fleet-wide alert, no healthy city
+    assert alerts[0][1]["labels"] == {"state": "partial_outage", "health_pct": 50.0, "city": "paris"}
+    assert alerts[0][1]["severity"] == "sev2" and "paris" in alerts[0][1]["summary"]
+    svc = {b["name"]: b for _, b in _of(posts, "/api/ingest/services", "name")}
+    assert svc["citypulse-fleet-paris"]["depends_on"] == ["citypulse-ingest"]
+    assert [s for s, _ in _of(posts, "/api/ingest/metrics")] == ["citypulse-ingest", "citypulse-fleet", "citypulse-fleet-paris"]
+    asyncio.run(rep.report())                                                        # unchanged verdict: not repeated at once
+    assert len(_of(posts, "/api/ingest/alerts")) == 1 and len(_of(posts, "/api/ingest/services", "name")) == 3
+
+
+def test_reporter_escalates_and_recovers_a_city(monkeypatch):
+    def snap(city_summary):
+        return {"overall": _summary(None, 90, 100, "degraded"), "multi": True, "cities": {"rome": city_summary} if city_summary else {}}
+    rep, posts = _run_reporter(monkeypatch, [snap(_summary("rome", 8, 10, "degraded")), snap(_summary("rome", 3, 10, "partial_outage")),
+                                             snap(_summary("rome", 10, 10, "operational"))])
+    asyncio.run(rep.report())
+    asyncio.run(rep.report())
+    assert [b["severity"] for _, b in _of(posts, "/api/ingest/alerts")] == ["sev3", "sev2"]   # worse: alert again at once
+    assert rep.city_state == {"rome": "partial_outage"}
+    asyncio.run(rep.report())
+    last = _of(posts, "/api/ingest/metrics")[-1]
+    assert last[0] == "citypulse-fleet-rome" and {p["name"]: p["value"] for p in last[1]["points"]}["fleet_health_pct"] == 100.0
+    assert rep.city_state == {} and len(_of(posts, "/api/ingest/alerts")) == 2               # recovered: reported once, then dropped

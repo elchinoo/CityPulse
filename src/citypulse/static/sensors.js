@@ -1,4 +1,5 @@
 import { api } from "/kit/api.js";
+import { currentCity, withCity } from "/static/cities.js";
 import { $, field, fill, h } from "/kit/ui.js";
 
 let catalog = null;
@@ -30,7 +31,7 @@ async function showDetail(box, id, back) {
   const s = await api(`/api/sensors/${encodeURIComponent(id)}`);
   fill(box, h("button", { class: "ghost", type: "button", onclick: back }, "← back to the list"),
     h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { class: "section-title" }, s.id), h("span", { class: `st ${s.status}` }, s.status)),
-      h("dl", { class: "facts" }, h("dt", {}, "Type"), h("dd", {}, s.type), h("dt", {}, "District"), h("dd", {}, s.district), h("dt", {}, "Protocol"), h("dd", {}, (s.protocol || "").replace("_", " ")),
+      h("dl", { class: "facts" }, h("dt", {}, "Type"), h("dd", {}, s.type), h("dt", {}, "City"), h("dd", {}, s.city), h("dt", {}, "District"), h("dd", {}, s.district), h("dt", {}, "Protocol"), h("dd", {}, (s.protocol || "").replace("_", " ")),
         h("dt", {}, "Last value"), h("dd", {}, String(s.last_value)), h("dt", {}, "Last reading"), h("dd", {}, ago(s.last_ts)),
         h("dt", {}, "Verdict"), h("dd", {}, s.reason || "healthy"), h("dt", {}, "Since"), h("dd", {}, ago(s.status_since))),
       spark(s.readings)),
@@ -55,10 +56,10 @@ export async function initSensors(arg = []) {
     if (distSel.value) p.set("district", distSel.value);
     if (q.value.trim()) p.set("q", q.value.trim());
     try {
-      const rows = await api(`/api/sensors?${p}`);
-      fill(out, rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["Sensor", "Type", "District", "Protocol", "State", "Last value", "Last reading", "Why"].map((t) => h("th", {}, t)))),
+      const rows = await api(withCity(`/api/sensors?${p}`));
+      fill(out, rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["Sensor", "City", "Type", "District", "Protocol", "State", "Last value", "Last reading", "Why"].map((t) => h("th", {}, t)))),
         h("tbody", {}, ...rows.map((r) => h("tr", { class: "clickable", onclick: () => showDetail(box, r.id, () => initSensors(arg)) },
-          h("td", {}, h("code", {}, r.id)), h("td", {}, r.type), h("td", {}, r.district), h("td", {}, (r.protocol || "").replace("_", " ")), h("td", {}, h("span", { class: `st ${r.status}` }, r.status)),
+          h("td", {}, h("code", {}, r.id)), h("td", {}, r.city), h("td", {}, r.type), h("td", {}, r.district), h("td", {}, (r.protocol || "").replace("_", " ")), h("td", {}, h("span", { class: `st ${r.status}` }, r.status)),
           h("td", { class: "num" }, String(r.last_value)), h("td", {}, ago(r.last_ts)), h("td", { class: "muted" }, r.reason || ""))))) :
         h("p", { class: "empty" }, stateSel.value === "problem" ? "No sensor has a problem right now." : "No sensors match."));
     } catch (err) { fill(out, h("p", { class: "error" }, err.message)); }
@@ -66,6 +67,6 @@ export async function initSensors(arg = []) {
   for (const c of [stateSel, typeSel, distSel]) c.addEventListener("change", draw);
   let t;
   q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(draw, 250); });
-  fill(box, h("h1", {}, "Sensors"), h("div", { class: "card" }, h("div", { class: "grid3" }, field("State", stateSel), field("Type", typeSel), field("District", distSel)), field("Search", q)), out);
+  fill(box, h("h1", {}, "Sensors", currentCity() ? h("small", { class: "scope-chip" }, ` · ${currentCity()}`) : null), h("div", { class: "card" }, h("div", { class: "grid3" }, field("State", stateSel), field("Type", typeSel), field("District", distSel)), field("Search", q)), out);
   draw();
 }

@@ -1,4 +1,4 @@
-"""The sensor simulator: thousands of sensors across 12 districts, reporting through the real collection path.
+"""The sensor simulator: thousands of sensors across 12 districts of one city (CITYPULSE_CITY), reporting through the real collection path.
 
 Each sensor follows a daily curve with its own bias and noise. Bursts (see chaos.py) bend that behaviour: flood,
 noise, dropout, stuck, late, corrupt. Delivery behaves like a real edge collector: batches of 100, a bounded retry
@@ -17,7 +17,7 @@ import httpx
 
 from . import chaos, gateway, metrics
 from . import settings_store as store
-from .catalog import TYPES, build_fleet, hash_str
+from .catalog import DEFAULT_CITY, TYPES, build_fleet, hash_str
 from .config import get_settings
 from .db import connect
 
@@ -72,11 +72,11 @@ class HttpSink:
 
 
 class Sensor:
-    __slots__ = ("id", "type", "district", "bias", "due", "state", "frozen", "member")
+    __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member")
 
-    def __init__(self, sid: str, kind: str, district: str, rng: random.Random):
+    def __init__(self, sid: str, kind: str, district: str, rng: random.Random, city: str = DEFAULT_CITY):
         t = TYPES[kind]
-        self.id, self.type, self.district = sid, kind, district
+        self.id, self.type, self.district, self.city = sid, kind, district, city
         self.bias = rng.gauss(0, t.sigma * 0.5) if t.sigma else 0.0
         self.due = time.time() + rng.uniform(0, t.interval)   # spread first reports over one interval
         self.state = rng.random() < 0.5                       # parking occupancy
@@ -94,12 +94,13 @@ def _reflect(v: float, lo: float, hi: float) -> float:
 
 
 class Simulator:
-    def __init__(self, n: int, speed: float, sink, bursts, rng: random.Random | None = None):
+    def __init__(self, n: int, speed: float, sink, bursts, rng: random.Random | None = None, city: str = DEFAULT_CITY):
         self.rng = rng or random.Random()
         self.speed = speed
         self.sink = sink
         self.bursts = bursts            # callable -> list[chaos.Burst]
-        self.sensors = [Sensor(*f, self.rng) for f in build_fleet(n)]
+        self.city = city
+        self.sensors = [Sensor(*f, self.rng, city) for f in build_fleet(n, city)]
         self.buffer: deque[dict] = deque()
         self.backoff = 0.0
         self.resume_at = 0.0
@@ -131,7 +132,7 @@ class Simulator:
     def read(self, s: Sensor, now: float, active: list) -> dict | None:
         """The payload item for this sensor now, or None if it stays silent. Moves its next due time."""
         t = TYPES[s.type]
-        mine = [b for b in active if b.matches(s.type, s.district)]
+        mine = [b for b in active if b.matches(s.type, s.district, s.city)]
 
         def level(kind: str) -> int:
             return max((b.intensity for b in mine if b.kind == kind), default=0)
@@ -149,6 +150,8 @@ class Simulator:
             v = self.value(s, now, 1 + 2 * noise, 0.04 * noise)
         item = {"sensor": s.id, "type": s.type, "district": s.district, "value": v,
                 "ts": round(now - 90 * late, 3)}
+        if s.city != DEFAULT_CITY:
+            item["city"] = s.city
         if corrupt and self.rng.random() < 0.08 * corrupt:
             item = self._corrupt(item)
         return item
@@ -228,7 +231,7 @@ class Simulator:
         await self.deliver(now)
 
     def heartbeat(self) -> dict:
-        return {"at": round(time.time()), "sensors": len(self.sensors), "sent": self.sent,
+        return {"at": round(time.time()), "city": self.city, "sensors": len(self.sensors), "sent": self.sent,
                 "buffer": len(self.buffer), "dropped": self.dropped, "backoff": round(self.backoff, 1),
                 "problem": self.fatal}
 
@@ -281,4 +284,4 @@ def make(direct: bool) -> Simulator:
             return chaos.active(conn)
 
     cache = chaos.Cache(lambda: load(), ttl=3.0)
-    return Simulator(cfg.sim_sensors, cfg.sim_speed, sink, cache.get)
+    return Simulator(cfg.sim_sensors, cfg.sim_speed, sink, cache.get, city=cfg.sim_city)

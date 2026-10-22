@@ -1,5 +1,6 @@
 import { api } from "/kit/api.js";
 import { lineChart } from "/static/charts.js";
+import { currentCity, setCity, withCity } from "/static/cities.js";
 import { $, fill, h } from "/kit/ui.js";
 
 const LABEL = { operational: "All systems operational", degraded: "Degraded", partial_outage: "Partial outage", major_outage: "Major outage" };
@@ -76,12 +77,30 @@ function protocolTable(s) {
       h("td", { class: "num" }, pct(p.ok / p.total)), h("td", {}, bar(p.ok / p.total)))))));
 }
 
+// With several cities, the least healthy few (a click selects one); never the whole list.
+async function worstCities() {
+  let out;
+  try { out = await api("/api/cities?sort=worst&limit=8"); } catch { return null; }
+  if (out.total < 2) return null;
+  const rows = out.cities.filter((c) => c.counts.ok < c.total);
+  return h("div", { class: "card flush" }, h("div", { class: "row pad" }, h("h2", { class: "section-title" }, "Cities needing attention"),
+    h("span", { class: "muted" }, `${out.total.toLocaleString()} cities; pick one in the City menu to drill in`)),
+  rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["City", "Sensors", "Health", "", "Worst", "Down"].map((t) => h("th", {}, t)))),
+    h("tbody", {}, ...rows.map((c) => h("tr", { class: "clickable", onclick: () => setCity(c.city) },
+      h("td", { class: "title" }, c.city), h("td", { class: "num" }, c.total.toLocaleString()), h("td", { class: "num" }, pct(c.health)),
+      h("td", {}, bar(c.health)), h("td", {}, h("span", { class: `st ${c.worst_status}` }, c.worst_status)), h("td", { class: "num" }, (c.total - c.counts.ok).toLocaleString()))))) :
+    h("p", { class: "empty" }, "Every city is healthy."));
+}
+
 async function render(box) {
   let s, hist;
-  try { [s, hist] = await Promise.all([api("/api/status"), api("/api/history?minutes=60")]); } catch (err) {
+  const scoped = currentCity();
+  try { [s, hist] = await Promise.all([api(withCity("/api/status")), api(withCity("/api/history?minutes=60"))]); } catch (err) {
     if (!box.firstChild) box.replaceChildren(h("p", { class: "error" }, err.message));
     return;
   }
+  if (scoped !== currentCity()) return;                          // the city changed while loading: a newer render is on its way
+  const cities = scoped ? null : await worstCities();
   const burst = s.bursts.length ? h("div", { class: "banner" }, h("strong", {}, "Burst active: "),
     s.bursts.map((b) => `${b.kind} on ${b.target} (level ${b.intensity}, ${b.seconds_left}s left)`).join(" · ")) : null;
   const health = hist.health.map((r) => [r.ts, r.total ? (100 * r.ok) / r.total : 100]);
@@ -90,10 +109,12 @@ async function render(box) {
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Fleet health, last hour (%)"), lineChart(health, { label: "Fleet health", yMax: 100, unit: "%" })),
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Readings per 30 s (by event time)"), lineChart(flow, { label: "Readings per 30 seconds" })));
   if (!s.total) {
+    if (scoped) { fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, `No sensors have reported for city ${scoped}.`))); return; }
     fill(box, h("div", { class: "card" }, h("p", { class: "empty" }, "No sensors have reported yet. The simulator starts on its own in the 'all' role; give it half a minute, or see Connect to send real readings.")));
     return;
   }
-  fill(box, burst, banner(s), kpis(s), heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
+  fill(box, burst, scoped ? h("p", { class: "muted" }, "Showing city ", h("span", { class: "scope-chip" }, scoped), ". Use the City menu to switch.") : null,
+    banner(s), kpis(s), cities, heatmap(s), charts, h("h2", { class: "section-title" }, "By sensor type"), typeTable(s),
     s.protocols && s.protocols.length > 1 ? h("h2", { class: "section-title" }, "By collection protocol") : null, protocolTable(s));
 }
 

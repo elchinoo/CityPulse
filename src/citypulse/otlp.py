@@ -5,6 +5,7 @@ Identity comes from attributes, data point first, then resource:
   sensor.id    the sensor's id (required)
   sensor.type  a catalogue key such as `temperature`; if absent, the metric name is used when it is a key
   district     district id (default `d00`)
+  city         city id (optional, default `default`); `city.id` is accepted as an alias. The data point wins over the resource.
 The OTel Collector can map any existing attribute to these with its `attributes`/`resource` processors.
 """
 import json
@@ -85,7 +86,8 @@ def to_readings(data: dict) -> tuple[list[dict], int]:
                 points = (metric.get("gauge") or metric.get("sum") or {}).get("dataPoints") or []
                 name = str(metric.get("name", "")).lower().replace(".", "_").replace("-", "_")
                 for p in points:
-                    attrs = {**res, **_attrs(p.get("attributes"))}
+                    point = _attrs(p.get("attributes"))
+                    attrs = {**res, **point}
                     sensor = attrs.get("sensor.id")
                     kind = attrs.get("sensor.type") or (name if name in TYPES else None)
                     value = p.get("asDouble", p.get("asInt"))
@@ -102,6 +104,10 @@ def to_readings(data: dict) -> tuple[list[dict], int]:
                         ts = None
                     item = {"sensor": str(sensor), "type": kind, "district": str(attrs.get("district") or "d00"),
                             "value": value, "protocol": "otlp"}
+                    city = next((str(v) for v in (point.get("city"), point.get("city.id"), res.get("city"), res.get("city.id"))
+                                 if v not in (None, "")), None)
+                    if city is not None:
+                        item["city"] = city
                     if ts:
                         item["ts"] = ts
                     items.append(item)

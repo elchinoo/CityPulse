@@ -1,5 +1,6 @@
 import { api } from "/kit/api.js";
 import { initBurst } from "/static/burst.js";
+import { onCityChange, renderCityPicker } from "/static/cities.js";
 import { initConnect } from "/static/connect.js";
 import { initOverview, stopOverview } from "/static/overview.js";
 import { initSensors } from "/static/sensors.js";
@@ -11,7 +12,7 @@ const TABS = ["overview", "sensors", "burst", "connect", "settings"];
 const INIT = { overview: initOverview, sensors: initSensors, burst: initBurst, connect: initConnect, settings: initSettings };
 // What each tab needs; the server enforces it, this only hides what would be refused.
 const NEEDS = { overview: "city:read", sensors: "city:read", burst: "city:control", connect: "city:read", settings: "settings:manage" };
-const SECTIONS = ["auth-card", "nav", "signout", ...TABS.map((t) => "view-" + t)];
+const SECTIONS = ["auth-card", "nav", "city-picker", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
 
@@ -36,11 +37,16 @@ async function boot(notice = "") {
   else showApp();
 }
 
+let pickerReady = false;
+onCityChange(() => route());                 // overview, sensors and burst redraw for the chosen city
+
 function showApp() {
   $("auth-card").hidden = true;
   for (const a of document.querySelectorAll("#nav a")) a.hidden = !can(NEEDS[a.dataset.tab]);
   $("nav").hidden = false;
   $("signout").hidden = false;
+  $("city-picker").hidden = !can("city:read");
+  if (can("city:read") && !pickerReady) { pickerReady = true; renderCityPicker($("city-picker")); }
   route();
 }
 

@@ -7,6 +7,11 @@ Two services are reported, mirroring cause and effect:
   citypulse-ingest   the gateway: up, ingest rate, reject rate, p95 batch latency, overloaded rate
   citypulse-fleet    the sensors: health, offline / stale / fault / stuck shares (depends on citypulse-ingest)
 When the fleet verdict worsens, an alert opens (or joins) an incident; it repeats every 10 minutes while it lasts.
+Cities: while only the city `default` exists (every existing deployment) nothing changes. Once any other city reports,
+`citypulse-fleet` keeps the metrics of the whole fleet but the alert is raised per city, and only for cities that have
+a problem: service `citypulse-fleet-<city>` (depends on citypulse-ingest), the same metrics, alert labels carry `city`.
+At most MAX_CITY_SERVICES (the least healthy) cities are tracked at once; a city that recovers gets a last healthy
+metric point and is dropped.
 An alternative that needs no code here: run `pagerlens-agent` against /healthz and /metrics.
 """
 import asyncio
@@ -26,6 +31,7 @@ REALERT_SECONDS = 600
 SEVERITY = {"degraded": "sev3", "partial_outage": "sev2", "major_outage": "sev1"}
 STATES = ["operational", "degraded", "partial_outage", "major_outage"]
 INGEST, FLEET = "citypulse-ingest", "citypulse-fleet"
+MAX_CITY_SERVICES = 20
 
 
 def _val(counter, **labels) -> float:
@@ -88,9 +94,21 @@ def fleet_points(s: dict) -> list[dict]:
     ]
 
 
-def _summary() -> dict:
+def city_service(city: str) -> str:
+    return f"{FLEET}-{city}"
+
+
+def _snapshot(tracked: frozenset = frozenset()) -> dict:
+    """The fleet summary, plus (once real cities exist) a summary per city that has a problem or was reported before."""
     with connect(retries=1) as conn:
-        return status.summary(conn)
+        overall = status.summary(conn)
+        info = status.problem_cities(conn, MAX_CITY_SERVICES)
+        multi = not info["only_default"]
+        cities = {}
+        if multi:
+            for city in [*info["problems"], *sorted(tracked - set(info["problems"]))]:
+                cities[city] = status.summary(conn, city)
+        return {"overall": overall, "multi": multi, "cities": cities}
 
 
 class Reporter:
@@ -102,6 +120,9 @@ class Reporter:
         self.registered = False
         self.last_state = "operational"
         self.last_alert = 0.0
+        self.city_state: dict[str, str] = {}      # tracked cities (have a problem or just recovered) -> last verdict
+        self.city_alert: dict[str, float] = {}
+        self.city_registered: set[str] = set()
 
     async def post(self, path: str, body: dict) -> None:
         headers = await asyncio.to_thread(self.source.headers) if self.source else None   # cached; refreshed shortly before it expires
@@ -118,25 +139,56 @@ class Reporter:
         await self.post("/api/ingest/deploys", {"service": INGEST, "version": __version__, "summary": "CityPulse started"})
         self.registered = True
 
+    async def register_city(self, city: str) -> None:
+        if city not in self.city_registered:
+            await self.post("/api/ingest/services", {"name": city_service(city), "tier": "critical", "owner": "city-platform",
+                                                     "description": f"The sensors of city {city} as seen by CityPulse",
+                                                     "depends_on": [INGEST]})
+            self.city_registered.add(city)
+
+    async def alert(self, service: str, s: dict, state: str, last_state: str, last_alert: float, city: str | None) -> float:
+        """Open (or re-raise) the degradation alert when the verdict worsened or 10 minutes passed. Returns the alert time."""
+        if state not in SEVERITY:
+            return last_alert
+        if STATES.index(state) > STATES.index(last_state) or time.monotonic() - last_alert > REALERT_SECONDS:
+            labels = {"state": state, "health_pct": round(100 * s["health"], 1)}
+            where = "CityPulse fleet"
+            if city:
+                labels["city"] = city
+                where = f"CityPulse city {city}"
+            await self.post("/api/ingest/alerts", {
+                "service": service, "name": "SensorFleetDegraded", "severity": SEVERITY[state], "source": "citypulse",
+                "summary": f"{where} is {state.replace('_', ' ')}: " + "; ".join(s["reasons"][:3]), "labels": labels})
+            return time.monotonic()
+        return last_alert
+
     async def report(self) -> None:
         if not self.registered:
             await self.register()
         rates = self.rates.sample()
-        s = await asyncio.to_thread(_summary)
+        snap = await asyncio.to_thread(_snapshot, frozenset(self.city_state))
+        s = snap["overall"]
         points = [{"name": "up", "value": 1.0}] + [{"name": k, "value": round(v, 3)} for k, v in rates.items()]
         await self.post("/api/ingest/metrics", {"service": INGEST, "points": points})
         if s["total"]:
             await self.post("/api/ingest/metrics", {"service": FLEET, "points": fleet_points(s)})
         state = s["state"]
-        if state in SEVERITY:
-            worse = STATES.index(state) > STATES.index(self.last_state)
-            if worse or time.monotonic() - self.last_alert > REALERT_SECONDS:
-                self.last_alert = time.monotonic()
-                await self.post("/api/ingest/alerts", {
-                    "service": FLEET, "name": "SensorFleetDegraded", "severity": SEVERITY[state], "source": "citypulse",
-                    "summary": f"CityPulse fleet is {state.replace('_', ' ')}: " + "; ".join(s["reasons"][:3]),
-                    "labels": {"state": state, "health_pct": round(100 * s["health"], 1)}})
+        if not snap["multi"]:                      # one fleet, as before
+            self.last_alert = await self.alert(FLEET, s, state, self.last_state, self.last_alert, None)
+            self.last_state = state
+            return
         self.last_state = state
+        for city, cs in snap["cities"].items():    # one service per city that has (or just had) a problem
+            await self.register_city(city)
+            await self.post("/api/ingest/metrics", {"service": city_service(city), "points": fleet_points(cs)})
+            cstate = cs["state"]
+            self.city_alert[city] = await self.alert(city_service(city), cs, cstate, self.city_state.get(city, "operational"),
+                                                     self.city_alert.get(city, 0.0), city)
+            if cstate == "operational" and cs["counts"]["ok"] == cs["total"]:
+                self.city_state.pop(city, None)     # recovered and reported once: stop tracking
+                self.city_alert.pop(city, None)
+            else:
+                self.city_state[city] = cstate
 
     async def run(self) -> None:
         while True:

@@ -105,3 +105,16 @@ button.burst:hover { filter: brightness(1.08); }
 .heat-key.h0 { background: var(--bad); } .heat-key.h1 { background: #ea580c; } .heat-key.h2 { background: var(--amber); }
 .heat-key.h3 { background: #84cc16; } .heat-key.h4 { background: var(--good); }
 .legend span { margin-right: .6rem; }
+
+/* City selector */
+.citypick { position: relative; margin-left: auto; margin-right: .75rem; }
+.city-btn { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.city-panel { position: absolute; right: 0; top: calc(100% + .3rem); z-index: 20; width: min(22rem, 90vw); padding: .6rem; box-shadow: 0 8px 28px rgb(0 0 0 / 18%); }
+.city-panel input { width: 100%; box-sizing: border-box; }
+.city-list { list-style: none; margin: .4rem 0 0; padding: 0; max-height: 18rem; overflow-y: auto; }
+.city-opt { display: flex; justify-content: space-between; gap: .5rem; align-items: center; padding: .35rem .5rem; border-radius: 8px; cursor: pointer; }
+.city-opt:hover, .city-opt:focus { background: color-mix(in srgb, var(--brand) 10%, transparent); outline: none; }
+.city-opt.sel { font-weight: 700; }
+.city-name { overflow-wrap: anywhere; }
+.city-note { margin: .4rem .2rem 0; }
+.scope-chip { font-weight: 600; color: var(--brand); }

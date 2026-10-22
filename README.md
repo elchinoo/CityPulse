@@ -48,6 +48,36 @@ create cities of simulated sensors (27 types, any protocol, a range, a frequency
 here. Each reading may carry an optional `protocol` field (`http` by default, `otlp`, `direct`, `modbus_tcp`, `ethernet_ip`,
 `ethercat`, `profinet`, `profibus`); the Overview breaks sensor health down by it.
 
+## Cities
+
+Every sensor belongs to one **city**: a short id (`^[a-z0-9][a-z0-9_-]{0,31}$`, e.g. `paris`). It is optional everywhere;
+without one a sensor is in the city `default`, so existing senders and existing deployments keep working unchanged (the
+migration puts every existing sensor in `default`). A sensor's city is fixed by its first reading, like its type and
+district: a reading that names another city for a known sensor id is rejected and counted like any other bad item
+(`city does not match the sensor's city`). Sensor ids are global, so make them unique across cities (the built-in
+simulator prefixes them with the city).
+
+* **Send it:** JSON `/api/readings` item field `"city"`; OTLP attribute `city` (or `city.id`) on the data point or the
+  resource (the data point wins); built-in simulator `CITYPULSE_CITY=paris`.
+* **Read it:** every read endpoint (`/api/status`, `/api/history`, `/api/sensors`, `/api/chaos`) takes an optional
+  `?city=<id>`; without it you see all cities, as before. `GET /api/cities?q=<prefix>&limit=<1-200, default 50>&offset=<n>&sort=name|worst`
+  lists cities (case-insensitive prefix search, paginated; `total` counts the matches) with `counts` per status, the
+  city's `health` and `state` (the same tiers as the fleet), its `worst_status` and its newest reading `last_ts`.
+  `sort=worst` puts the least healthy first. Sensor rows and `/api/sensors/<id>` carry `city`.
+* **Pick it:** the dashboard has a searchable **City** menu (remembered in the browser). It never lists thousands of
+  options: it asks the server for the first 12 matches (least healthy first, or by prefix as you type). It filters the
+  Overview, Sensors and Burst tabs; with all cities shown, the Overview lists the least healthy few.
+* **Burst it:** a burst target may be `city:<id>` next to `all`, `district:<id>` and `type:<key>` (the city must have
+  reported); `POST /api/chaos/storm` takes an optional `{"city": "<id>"}`. Existing targets span every city.
+* **History per city:** the status engine records a health series per city every 30 s: for all cities while there are at
+  most 200, otherwise for the 200 least healthy that have a problem (a city not tracked simply has no series, so its chart
+  shows "collecting data"). The throughput chart of a city is computed from its readings.
+* **PagerLens:** while only `default` exists, the reporter behaves exactly as before. Once another city reports,
+  `citypulse-fleet` keeps the whole-fleet metrics but the `SensorFleetDegraded` alert is raised per city, only for cities
+  that have a problem, on service `citypulse-fleet-<city>` (depends on `citypulse-ingest`) with a `city` label. At most the 20
+  least healthy cities are tracked at once.
+* **Metrics:** `/metrics` has no per-city label (the cardinality would be unbounded); per-city numbers are in the API.
+
 ## What the status engine decides
 
 Per sensor, first match wins: **offline** (nothing for 12 reporting intervals), **stale** (3 intervals),
@@ -70,17 +100,17 @@ curl -sS -X POST "$CITYPULSE_URL/api/readings" \
 Bad items are rejected one by one and counted (`{"accepted":…,"rejected":…,"errors":[…]}`); the rest are stored.
 `ts` is optional (epoch seconds or milliseconds, or ISO 8601; up to 24 h old). **HTTP 429 with `Retry-After`** means
 the gateway is saturated: keep the batch and retry with backoff, which is what the simulator does. A sensor's type and
-district are fixed by its first reading.
+district and city are fixed by its first reading. `city` is optional (default `default`), see **Cities**.
 
 **OpenTelemetry** (OTLP/HTTP, protobuf or JSON, gzip accepted) at `POST /v1/metrics`. Gauge and sum data points become
 readings. Identity comes from the attributes `sensor.id`, `sensor.type` (or a metric named after the type) and
-`district`, on the data point or the resource. With the OTel Collector, point an `otlphttp` exporter at the base URL
+`district` and optionally `city` (or `city.id`), on the data point or the resource. With the OTel Collector, point an `otlphttp` exporter at the base URL
 and map your attributes with the `attributes`/`resource` processors. (Logs and traces are not accepted here.)
 
 **The simulator as a separate process**, pushing through the same HTTP API as any collector:
 
 ```
-CITYPULSE_ROLE=sim  CITYPULSE_INGEST_URL=https://your-citypulse  CITYPULSE_INGEST_TOKEN=<ingest token>  SIM_SENSORS=3000
+CITYPULSE_ROLE=sim  CITYPULSE_INGEST_URL=https://your-citypulse  CITYPULSE_INGEST_TOKEN=<ingest token>  SIM_SENSORS=3000  CITYPULSE_CITY=paris
 ```
 
 It keeps a bounded retry buffer (100,000 readings), backs off exponentially, and keeps original timestamps on retry,
@@ -138,6 +168,7 @@ Services use `client_credentials` instead of a hand-copied token: scope `citypul
 | `CITYPULSE_ROLE` | `all` | `api`, `sim` or `all` |
 | `SIM_SENSORS` | `3000` | Simulated sensors (10 to 50,000) |
 | `SIM_SPEED` | `1` | Reporting-rate multiplier (1 to 20) |
+| `CITYPULSE_CITY` | `default` | City of the built-in simulator's sensors (ids become `<city>.<type>-<district>-<n>` unless `default`) |
 | `CITYPULSE_INGEST_URL`, `CITYPULSE_INGEST_TOKEN` | – | Where the `sim` role pushes, and its token |
 | `RETENTION_HOURS` | `6` | How long raw readings are kept |
 | `MAX_SENSORS` | `50000` | Cap on auto-registered sensors (bounds abuse) |
@@ -179,7 +210,7 @@ make test-db                     # everything, against a throwaway database on t
 ```
 
 The suite covers validation, the simulator's behaviour under every burst, back-pressure and retry, each status
-verdict, token scopes (ingest cannot read, read cannot write, metrics only scrapes), OTLP in all three encodings
+verdict, cities (ingest with and without, mismatch, OTLP, every filter, `/api/cities`, city bursts, the upgrade from the pre-city schema, per-city alerts), token scopes (ingest cannot read, read cannot write, metrics only scrapes), OTLP in all three encodings
 including a gzip bomb, `/metrics`, and the federated paths (roles, service scopes, SSO login with a mocked provider; those run with `make test-db`).
 
 ## Honest limits
@@ -189,6 +220,7 @@ including a gzip bomb, `/metrics`, and the federated paths (roles, service scope
 * The OTLP receiver has been tested with synthetic payloads, not with a live OpenTelemetry SDK or Collector.
 * Rate limiting of failed sign-ins is in memory, per process.
 * Tokens are cached for 30 seconds per process, so a revoked token can still work briefly on other replicas.
-* PagerLens diagnoses the three sensor-fleet patterns (ingest overload, sensor-fleet outage, bad data) from the metrics above; it does not see per-district detail beyond the worst-district share.
+* PagerLens diagnoses the three sensor-fleet patterns (ingest overload, sensor-fleet outage, bad data) from the metrics above; it does not see per-district detail beyond the worst-district share (per-city detail only for the 20 least healthy cities).
+* Per-city detail is API-only: `/metrics` has no city label. `scripts/bench_ingest.py` measures ingest throughput against a scratch database.
 
 Licensed under Apache-2.0. See [SECURITY.md](SECURITY.md).

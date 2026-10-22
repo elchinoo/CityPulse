@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, chaos, core, gateway, metrics, otlp, reporter, sim, status
-from .catalog import DISTRICTS, GROUPS, TYPES
+from .catalog import CITY_ID, DISTRICTS, GROUPS, TYPES
 from .config import get_settings
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
 from .db import connect
@@ -86,6 +86,10 @@ app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/
                    max_body=MAX_BODY, observe=core.metrics.observe)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 mount_kit_static(app)
+
+
+CITY_PATTERN = CITY_ID.pattern
+CityParam = Query(None, max_length=32, pattern=CITY_PATTERN, description="Only this city; all cities when omitted")
 
 
 def _api_role() -> None:
@@ -386,23 +390,36 @@ def catalog():
 
 
 @app.get("/api/status", dependencies=[Depends(require("city:read"))])
-def get_status():
+def get_status(city: str | None = CityParam):
     _api_role()
     try:
         with connect(retries=1) as conn:
-            s = status.summary(conn)
+            s = status.summary(conn, city)
             s["sim"] = sim.heartbeat(conn)
-            s["bursts"] = chaos.active(conn)
+            s["bursts"] = chaos.active(conn, city)
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc
     return s
 
 
 @app.get("/api/history", dependencies=[Depends(require("city:read"))])
-def get_history(minutes: int = Query(60, ge=5, le=720)):
+def get_history(minutes: int = Query(60, ge=5, le=720), city: str | None = CityParam):
     _api_role()
     with connect() as conn:
-        return {"health": status.history(conn, minutes), "throughput": status.throughput(conn, minutes)}
+        return {"city": city, "health": status.history(conn, minutes, city), "throughput": status.throughput(conn, minutes, city)}
+
+
+@app.get("/api/cities", dependencies=[Depends(require("city:read"))])
+def list_cities(q: str = Query("", max_length=32, pattern=r"^[A-Za-z0-9_-]*$"), limit: int = Query(50, ge=1, le=200),
+                offset: int = Query(0, ge=0, le=1_000_000), sort: str = Query("name", pattern="^(name|worst)$")):
+    """One page of cities: sensor counts per status, tier, worst sensor status and newest reading time.
+    `q` is a case-insensitive prefix; `sort=worst` lists the least healthy first. `total` counts the matches."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return status.cities(conn, q, limit, offset, sort)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
 
 
 _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
@@ -411,6 +428,7 @@ _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 @app.get("/api/sensors", dependencies=[Depends(require("city:read"))])
 def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"),
                  type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24),
+                 city: str | None = CityParam,
                  q: str | None = Query(None, max_length=64), limit: int = Query(100, ge=1, le=500)):
     _api_role()
     if type is not None and type not in TYPES:
@@ -427,10 +445,13 @@ def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|o
     if district:
         where.append("district = %s")
         args.append(district)
+    if city:
+        where.append("city = %s")
+        args.append(city)
     if q:
         where.append("position(%s in id) > 0")
         args.append(q.lower())
-    sql = ("SELECT id, type, district, protocol, status, reason, last_ts, last_value, status_since FROM sensor"
+    sql = ("SELECT id, type, district, city, protocol, status, reason, last_ts, last_value, status_since FROM sensor"
            + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY status_since DESC LIMIT %s")
     with connect() as conn:
         return conn.execute(sql, [*args, limit]).fetchall()
@@ -461,13 +482,14 @@ class BurstBody(BaseModel):
 
 class StormBody(BaseModel):
     seconds: int = Field(default=180, ge=5, le=chaos.MAX_SECONDS)
+    city: str | None = Field(default=None, max_length=32, pattern=CITY_PATTERN)   # confine the storm to one city
 
 
 @app.get("/api/chaos", dependencies=[Depends(require("city:read"))])
-def get_chaos():
+def get_chaos(city: str | None = CityParam):
     _api_role()
     with connect() as conn:
-        return {"active": chaos.active(conn), "kinds": chaos.KINDS}
+        return {"active": chaos.active(conn, city), "kinds": chaos.KINDS}
 
 
 @app.post("/api/chaos", dependencies=[Depends(require("city:control"))])
@@ -486,7 +508,9 @@ def post_storm(body: StormBody):
     _api_role()
     try:
         with connect() as conn:
-            return {"ids": chaos.storm(conn, body.seconds)}
+            if body.city and not conn.execute("SELECT 1 FROM sensor WHERE city = %s LIMIT 1", (body.city,)).fetchone():
+                raise chaos.ChaosError(f"no sensor reports for city {body.city!r}")
+            return {"ids": chaos.storm(conn, body.seconds, city=body.city)}
     except chaos.ChaosError as exc:
         raise HTTPException(422, str(exc)) from exc
 

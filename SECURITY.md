@@ -37,7 +37,7 @@ version or commit.
 
 **Collection paths**
 - `/api/readings` and `/v1/metrics` need an `ingest` token. Every item is validated (sensor id, known type,
-  district, finite number within bounds, timestamp window of 24 hours back and 2 minutes ahead). Request bodies are
+  district, optional city, finite number within bounds, timestamp window of 24 hours back and 2 minutes ahead). Request bodies are
   capped at 2 MB, batches at 1000 readings, gzip bodies are inflated with a hard 8 MB limit, and unknown encodings
   and content types are refused. The number of auto-registered sensors is capped (`MAX_SENSORS`).
 - The gateway never blocks without bound: when its write slots or database connections are exhausted it answers
@@ -53,6 +53,10 @@ version or commit.
 
 **Container and database**
 - The image runs as a non-root user, holds no secrets, and takes its connection details at runtime.
+- City ids are data: validated against `^[a-z0-9][a-z0-9_-]{0,31}$` at ingest, in query parameters, in burst targets (also a
+  database CHECK), always passed as SQL parameters (the `/api/cities?q=` prefix is escaped for `LIKE`), and written into the page
+  only with `textContent`. A sensor cannot change city after its first reading, so a leaked ingest token cannot move or
+  hide an existing sensor under another city. Per-city access control does not exist: `city:read` sees every city.
 - All SQL is parameterised. Sensor search uses `position()` rather than `LIKE`, so user input has no wildcard
   semantics. The interface sets a strict Content-Security-Policy (no inline scripts or styles), `X-Frame-Options:
   DENY`, `nosniff` and `no-referrer`, and builds every DOM node with `textContent`.
