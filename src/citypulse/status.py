@@ -8,7 +8,9 @@ Per sensor (first match wins):
   ok       otherwise
 Every roll-up can be limited to one city (`city=`); sensors of all cities are judged together by evaluate().
 Overall: operational >= 97% ok, degraded >= 85%, partial_outage >= 50%, else major_outage; a district below 50% ok
-(with at least 20 sensors) also forces at least partial_outage.
+(with at least 20 sensors) also forces at least partial_outage, so the headline can be worse than the fleet percentage
+suggests; the reasons then say which district did it. A type below 85% ok (at least 5 sensors) is listed as a reason only.
+Nothing is smoothed: verdicts follow the sensors, so the fleet recovers within one engine tick (10 s) of readings returning.
 """
 import asyncio
 import sys
@@ -24,6 +26,8 @@ from .db import connect
 STATUSES = ["ok", "stale", "offline", "fault", "stuck"]
 TIERS = [(0.97, "operational"), (0.85, "degraded"), (0.5, "partial_outage"), (0.0, "major_outage")]
 _RANK = {"operational": 0, "degraded": 1, "partial_outage": 2, "major_outage": 3}
+DISTRICT_FLOOR, DISTRICT_MIN = 0.5, 20     # a district below this share ok (with at least this many sensors) forces a partial outage
+TYPE_FLOOR, TYPE_MIN = 0.85, 5             # a sensor type below this share ok (at least this many sensors) is named in the reasons
 TICK_SECONDS, HISTORY_EVERY, PRUNE_EVERY = 10, 30, 60
 _last = {"history": 0.0, "prune": 0.0}
 
@@ -99,16 +103,18 @@ def summary(conn, city: str | None = None) -> dict:
     by_district = _bucket(rows, "district", district_name)
     by_protocol = _bucket(rows, "protocol", lambda k: k.replace("_", " "))
     overall = tier(health) if total else "operational"
-    reasons = []
+    fleet, forced, weak = [], [], []
     for d in by_district:
-        if d["total"] >= 20 and d["ok"] / d["total"] < 0.5:
+        if d["total"] >= DISTRICT_MIN and d["ok"] / d["total"] < DISTRICT_FLOOR:
             overall = max(overall, "partial_outage", key=_RANK.get)
-            reasons.append(f"{d['label']} is {round(100 * d['ok'] / d['total'])}% healthy")
+            forced.append(f"{d['label']} is {round(100 * d['ok'] / d['total'])}% healthy "
+                          f"(a district under {round(100 * DISTRICT_FLOOR)}% healthy makes it at least a partial outage)")
     for t in by_type:
-        if t["total"] >= 5 and t["ok"] / t["total"] < 0.85:
-            reasons.append(f"{t['label']}: {round(100 * t['ok'] / t['total'])}% healthy")
+        if t["total"] >= TYPE_MIN and t["ok"] / t["total"] < TYPE_FLOOR:
+            weak.append(f"{t['label']}: {round(100 * t['ok'] / t['total'])}% healthy (under {round(100 * TYPE_FLOOR)}%)")
     if total and health < 0.97:
-        reasons.insert(0, f"fleet is {round(100 * health, 1)}% healthy ({total - counts['ok']} of {total} sensors have a problem)")
+        fleet.append(f"fleet is {round(100 * health, 1)}% healthy ({total - counts['ok']} of {total} sensors have a problem)")
+    reasons = fleet + forced + weak                  # the district that forced the verdict is never cut by the limit below
     # Districts are whatever the sensors report: bounded for the page, the matrix and the metrics (the verdict above used all of them).
     shown = sorted(by_district, key=lambda d: (-d["total"], d["key"]))[:DISTRICT_LIMIT]
     keep = {d["key"] for d in shown}

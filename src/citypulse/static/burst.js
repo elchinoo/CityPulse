@@ -1,6 +1,7 @@
 import { api } from "/kit/api.js";
 import { currentCity, withCity } from "/static/cities.js";
 import { loadDistricts } from "/static/districts.js";
+import { duration } from "/static/fmt.js";
 import { $, fill, h, toast } from "/kit/ui.js";
 
 let timer = null;
@@ -44,7 +45,7 @@ export async function initBurst() {
     try {
       const a = (await api(withCity("/api/chaos"))).active;
       fill(activeBox, a.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["Burst", "Target", "Level", "Ends in"].map((t) => h("th", {}, t)))),
-        h("tbody", {}, ...a.map((b) => h("tr", {}, h("td", { class: "title" }, b.kind.replace("_", " ")), h("td", {}, b.target), h("td", {}, b.intensity), h("td", {}, `${b.seconds_left}s`))))) :
+        h("tbody", {}, ...a.map((b) => h("tr", {}, h("td", { class: "title" }, b.kind.replace("_", " ")), h("td", {}, b.target), h("td", {}, b.intensity), h("td", {}, duration(b.seconds_left)))))) :
         h("p", { class: "empty" }, "Nothing is running. The city is having a normal day."));
     } catch { /* keep the last view; the next tick retries */ }
   }

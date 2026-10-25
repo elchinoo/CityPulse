@@ -126,7 +126,17 @@ are fixed, they go offline and would raise a city alert in PagerLens like any un
 Per sensor, first match wins: **offline** (nothing for 12 reporting intervals), **stale** (3 intervals),
 **fault** (the latest value is outside the physical limits of its type), **stuck** (five or more identical recent
 readings, continuous types only), otherwise **ok**. The city is *operational* at ≥97% ok, *degraded* ≥85%,
-*partial outage* ≥50%, else *major outage*; a district below 50% ok forces at least a partial outage.
+*partial outage* ≥50%, else *major outage*; a district below 50% ok (with at least 20 sensors) forces at least a partial
+outage, so the headline can be worse than the percentage next to it (for example 91% healthy but a partial outage): the
+first reason is the fleet figure, the next ones name the district that forced the verdict. A sensor type below 85% ok
+(at least 5 sensors) is listed as a reason (`CO2: 35% healthy (under 85%)`) but never changes the verdict. Nothing is
+smoothed or latched: the engine re-judges every 10 s from the readings' own timestamps, so once a restarted sensor
+source reports again, the sensors turn ok on the next pass and the verdict recovers within about 10 s plus the page's 5 s refresh.
+
+The Overview's *Simulator buffer* tile belongs to the built-in simulator: it is shown only when the API reports one (role
+`all`, or a simulator running against the same database), and hidden under `CITYPULSE_ROLE=api`, where the readings come from
+a separate CityPulse Simulator. Durations in the UI are humanized everywhere (`42s`, `4 min`, `3 h`, `3 days ago`). While a page's
+first data is loading it shows "Loading…", and a failed first request shows the error with a *Try again* button.
 
 ## Collecting data
 

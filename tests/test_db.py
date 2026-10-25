@@ -11,7 +11,7 @@ if not os.environ.get("TEST_DATABASE_URL"):
 
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest  # noqa: E402
 
-from citypulse import auth, chaos, core, db, gateway, migrate, otlp, status  # noqa: E402
+from citypulse import auth, chaos, core, db, gateway, migrate, otlp, sim, status  # noqa: E402
 from citypulse.db import connect  # noqa: E402
 
 H = {"X-CityPulse-CSRF": "1"}
@@ -163,6 +163,55 @@ def test_summary_tiers_and_district_outage():
     assert s["health"] == pytest.approx(40 / 60)
     assert s["state"] == "partial_outage" and any("Harbor" in r for r in s["reasons"])
     assert status.tier(0.99) == "operational" and status.tier(0.9) == "degraded" and status.tier(0.2) == "major_outage"
+
+
+def test_a_district_forcing_the_verdict_is_named_in_the_reasons():
+    """91%-style case: the fleet figure alone says 'degraded', one failing district makes it a partial outage, and the reasons say so."""
+    gateway.accept([reading(i, district="d01") for i in range(20)] + [reading(i, district="d02") for i in range(80)])
+    with connect() as c:
+        c.execute("UPDATE sensor SET status='offline' WHERE district='d01' AND id < 'temperature-d01-0011'")  # 11 of 20 down: 45% ok
+        c.commit()
+        s = status.summary(c)
+    assert status.tier(s["health"]) == "degraded" and s["state"] == "partial_outage"
+    assert s["reasons"][0].startswith("fleet is 89.0% healthy")
+    forced = next(r for r in s["reasons"] if "Harbor" in r)
+    assert "45% healthy" in forced and "under 50%" in forced and "at least a partial outage" in forced
+    assert not any(r.startswith("Temperature") for r in s["reasons"])      # 89% is above the 85% a type needs to stay unlisted
+
+
+def test_the_verdict_recovers_within_one_engine_pass_of_data_returning():
+    items = [reading(i) for i in range(30)]
+    gateway.accept(items)
+    with connect() as c:
+        c.execute("UPDATE sensor SET last_ts = now() - interval '1 hour'")
+        status.evaluate(c)
+        c.commit()
+        assert status.summary(c)["state"] == "major_outage"
+    gateway.accept(items)                                  # the sensor source restarts and reports again
+    with connect() as c:
+        status.evaluate(c)
+        c.commit()
+        s = status.summary(c)
+    assert s["state"] == "operational" and s["health"] == 1.0 and s["reasons"] == []
+
+
+def test_status_hides_a_simulator_heartbeat_that_has_no_simulator_behind_it(client, monkeypatch):
+    login(client)
+    gateway.accept([reading()])
+    beat = {"at": round(time.time()) - 264064, "city": "x", "sensors": 3, "sent": 1, "buffer": 0, "dropped": 0}
+    with connect() as c:
+        sim.store.put(c, sim.HEARTBEAT_KEY, json.dumps(beat))
+        c.commit()
+    assert client.get("/api/status").json()["sim"] is None                       # role api (the tests' role): an old heartbeat is not shown
+    monkeypatch.setenv("CITYPULSE_ROLE", "all")
+    s = client.get("/api/status").json()["sim"]
+    assert s["running"] is False and s["age"] >= 264064                          # role all: a stopped built-in simulator is worth showing
+    monkeypatch.setenv("CITYPULSE_ROLE", "api")
+    beat["at"] = round(time.time())
+    with connect() as c:
+        sim.store.put(c, sim.HEARTBEAT_KEY, json.dumps(beat))
+        c.commit()
+    assert client.get("/api/status").json()["sim"]["running"] is True            # a live simulator sharing the database is shown
 
 
 def test_tick_runs_once_and_prunes_old_readings():

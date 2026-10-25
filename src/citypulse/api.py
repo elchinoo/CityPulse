@@ -397,7 +397,9 @@ def get_status(city: str | None = CityParam):
     try:
         with connect(retries=1) as conn:
             s = status.summary(conn, city)
-            s["sim"] = sim.heartbeat(conn)
+            beat = sim.heartbeat(conn)
+            # Role api has no built-in simulator (the data comes from a separate one); an old heartbeat left in the database is not shown.
+            s["sim"] = beat if beat and (get_settings().role != "api" or beat["running"]) else None
             s["bursts"] = chaos.active(conn, city)
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc

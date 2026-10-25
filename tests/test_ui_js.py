@@ -44,6 +44,14 @@ def test_pages_keep_what_is_typed_when_they_refresh():
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
 
 
+def test_first_paint_states_durations_and_the_simulator_tile():
+    """Loading... until the first data, a readable error if it fails, humanized durations, no simulator tile without a built-in simulator."""
+    env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
+    r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "states.mjs")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
 def test_the_page_stays_under_a_strict_csp():
     html = (APP_STATIC / "index.html").read_text()
     assert "<script>" not in html and " onclick=" not in html and "style=" not in html

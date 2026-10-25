@@ -1,14 +1,10 @@
 import { api } from "/kit/api.js";
 import { currentCity, withCity } from "/static/cities.js";
 import { loadDistricts } from "/static/districts.js";
+import { ago } from "/static/fmt.js";
 import { $, field, fill, h } from "/kit/ui.js";
 
 let catalog = null;
-const ago = (iso) => {
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
-};
-
 function spark(readings) {
   const NS = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(NS, "svg");

@@ -2,6 +2,7 @@ import { api } from "/kit/api.js";
 import { initBurst } from "/static/burst.js";
 import { onCityChange, renderCityPicker } from "/static/cities.js";
 import { initConnect } from "/static/connect.js";
+import { showError, showLoading } from "/static/fmt.js";
 import { initOverview, stopOverview } from "/static/overview.js";
 import { initSensors } from "/static/sensors.js";
 import { can, refreshSession, renderLogin, renderSetup, state } from "/kit/session.js";
@@ -58,7 +59,10 @@ function route() {
   if (tab !== "overview") stopOverview();
   for (const t of TABS) $("view-" + t).hidden = t !== tab;
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === tab);
-  INIT[tab](tab === "sensors" ? arg : undefined);
+  const box = $("view-" + tab);
+  if (!box.firstChild) showLoading(box);         // after sign-in the first data takes a moment: never a blank page
+  const start = () => Promise.resolve(INIT[tab](tab === "sensors" ? arg : undefined)).catch((err) => { if (state.session) showError(box, err, start); });
+  start();
 }
 
 $("signout").addEventListener("click", async () => {

@@ -3,6 +3,7 @@ import { lineChart } from "/static/charts.js";
 import { currentCity, setCity, withCity } from "/static/cities.js";
 import { deleteCityControl, LEGACY_TEXT } from "/static/citydelete.js";
 import { prettyDistrict } from "/static/districts.js";
+import { agoSeconds, duration, showError, showLoading } from "/static/fmt.js";
 import { can } from "/kit/session.js";
 import { $, fill, h } from "/kit/ui.js";
 
@@ -34,11 +35,12 @@ function banner(s) {
 function kpis(s) {
   const k = (label, n, cls = "") => h("div", { class: `kpi ${cls}` }, h("b", {}, n.toLocaleString()), h("span", {}, label));
   const c = s.counts, sim = s.sim;
-  const simText = !sim ? "no simulator seen" : sim.running ? `running, ${sim.sensors.toLocaleString()} sensors` : `stopped ${sim.age}s ago`;
+  const simText = !sim ? "" : sim.running ? `running, ${sim.sensors.toLocaleString()} sensors` : `stopped ${agoSeconds(sim.age)}`;
   return h("div", { class: "kpis" },
     k("Sensors", s.total), k("OK", c.ok, "ok"), k("Stale", c.stale, c.stale ? "warn" : ""), k("Offline", c.offline, c.offline ? "bad" : ""),
     k("Fault", c.fault, c.fault ? "bad" : ""), k("Stuck", c.stuck, c.stuck ? "warn" : ""),
-    h("div", { class: `kpi ${sim && sim.running ? "ok" : "warn"}` }, h("b", {}, sim && sim.running ? `${sim.buffer.toLocaleString()}` : "–"), h("span", {}, `Simulator buffer · ${simText}`)));
+    // Only a deployment with a built-in simulator has this tile (the API tells us with `sim`; a fleet fed over HTTP has none).
+    sim ? h("div", { class: `kpi ${sim.running ? "ok" : "warn"}` }, h("b", {}, sim.running ? `${sim.buffer.toLocaleString()}` : "–"), h("span", {}, `Simulator buffer · ${simText}`)) : null);
 }
 
 function heatmap(s) {
@@ -119,11 +121,12 @@ async function render(view) {
   try { await draw(view); } finally { view.busy = false; }
 }
 
-async function draw({ head, actions, body }) {
+async function draw(view) {
+  const { head, actions, body } = view;
   let s, hist;
   const scoped = currentCity();
   try { [s, hist] = await Promise.all([api(withCity("/api/status")), api(withCity("/api/history?minutes=60"))]); } catch (err) {
-    if (!body.firstChild) body.replaceChildren(h("p", { class: "error" }, err.message));
+    if (!view.loaded) showError(body, err, () => { showLoading(body); render(view); });   // first paint failed: say so, never leave it blank
     return;
   }
   if (scoped !== currentCity()) return;                          // the city changed while loading: a newer render is on its way
@@ -132,12 +135,13 @@ async function draw({ head, actions, body }) {
   const cities = worstCities(list);
   const legacy = scoped ? (s.legacy ? legacyNotice(scoped, true) : null) : (list && list.legacy_city ? legacyNotice(list.legacy_city, false) : null);
   const burst = s.bursts.length ? h("div", { class: "banner" }, h("strong", {}, "Burst active: "),
-    s.bursts.map((b) => `${b.kind} on ${b.target} (level ${b.intensity}, ${b.seconds_left}s left)`).join(" · ")) : null;
+    s.bursts.map((b) => `${b.kind} on ${b.target} (level ${b.intensity}, ${duration(b.seconds_left)} left)`).join(" · ")) : null;
   const health = hist.health.map((r) => [r.ts, r.total ? (100 * r.ok) / r.total : 100]);
   const flow = hist.throughput.map((r) => [r.ts, r.n]);
   const charts = h("div", { class: "panel-grid" },
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Fleet health, last hour (%)"), lineChart(health, { label: "Fleet health", yMax: 100, unit: "%" })),
     h("figure", { class: "card chartbox" }, h("figcaption", {}, "Readings per 30 s (by event time)"), lineChart(flow, { label: "Readings per 30 seconds" })));
+  view.loaded = true;
   if (!s.total) {
     syncActions(actions, `${scoped}|none`, scoped && s.legacy && can("city:delete") ? () => deleteCityControl(scoped, { onDone: () => setCity("") }) : null);
     if (scoped) { fill(head); fill(body, h("div", { class: "card" }, h("p", { class: "empty" }, `No sensors have reported for city ${scoped}.`))); return; }
@@ -156,8 +160,12 @@ async function draw({ head, actions, body }) {
 export async function initOverview() {
   const box = $("view-overview");
   clearInterval(timer);
-  if (!catalog) catalog = await api("/api/catalog");
-  const view = { head: h("div"), actions: h("div", { class: "overview-actions" }), body: h("div") };
+  if (!catalog) {
+    showLoading(box);
+    try { catalog = await api("/api/catalog"); } catch (err) { showError(box, err, initOverview); return; }
+  }
+  const view = { head: h("div"), actions: h("div", { class: "overview-actions" }), body: h("div"), loaded: false };
+  showLoading(view.body);
   fill(box, view.head, view.actions, view.body);
   await render(view);
   timer = setInterval(() => { if (document.hidden || location.hash.slice(1).split("/")[0] !== "overview" && location.hash !== "") return; render(view); }, 5000);
