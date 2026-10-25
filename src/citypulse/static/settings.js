@@ -1,5 +1,5 @@
 import { api } from "/kit/api.js";
-import { $, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
+import { $, confirmDialog, copy, field, fill, fmtDate, h, toast } from "/kit/ui.js";
 
 export async function initSettings() {
   const box = $("view-settings");
@@ -36,7 +36,7 @@ export async function initSettings() {
         h("td", { class: "title" }, t.name), h("td", {}, h("code", {}, `${t.prefix}…`)), h("td", {}, t.scope),
         h("td", {}, fmtDate(t.created_at)), h("td", {}, fmtDate(t.last_used_at)),
         h("td", { class: "actions" }, t.revoked_at ? h("span", { class: "muted" }, "revoked") : h("button", { class: "danger small", type: "button", onclick: async () => {
-          if (!confirm(`Revoke "${t.name}"? Clients using it stop working.`)) return;
+          if (!(await confirmDialog(`Revoke "${t.name}"? Clients using it stop working.`, { title: "Revoke token", confirmLabel: "Revoke", danger: true }))) return;
           try { await api(`/api/tokens/${t.id}`, { method: "DELETE" }); toast("Token revoked"); drawTokens(); } catch (err) { toast(err.message, true); }
         } }, "Revoke"))))))) : h("p", { class: "hint" }, "No tokens yet."));
   }

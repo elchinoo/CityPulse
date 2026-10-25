@@ -123,5 +123,3 @@ button.burst:hover { filter: brightness(1.08); }
 .city-delete-panel { margin: .5rem 0; max-width: 40rem; }
 .city-delete-panel input { width: 100%; box-sizing: border-box; margin: .4rem 0; }
 
-.cp-loading { padding: 3rem 1rem; text-align: center; }
-.cp-error { padding: 2.5rem 1rem; text-align: center; }

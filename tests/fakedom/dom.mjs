@@ -5,6 +5,7 @@ export class El {
     this.hidden = false; this.disabled = false; this.className = ""; this.value = ""; this.dataset = {}; this.parent = null;
     this.style = { setProperty() {} }; this.classList = { toggle() {}, add() {}, remove() {} };
   }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }   // the dialogs unmount themselves
   get firstChild() { return this.children[0] || null; }
   contains(node) { return node === this || this.all().includes(node); }
   append(...kids) { for (const k of kids) { if (k.nodeType) { k.parent = this; this.children.push(k); } else this.children.push({ nodeType: 3, data: String(k) }); } }
@@ -27,9 +28,10 @@ export class El {
 
 export function install() {
   const byId = { toast: new El("div") };
+  const body = new El("body");                 // confirmDialog/promptDialog mount their overlay under <body>, outside every view
   globalThis.document = {
     createElement: (tag) => new El(tag), createElementNS: (_ns, tag) => new El(tag), createTextNode: (data) => ({ nodeType: 3, data: String(data) }),
-    getElementById: (id) => byId[id] || null, documentElement: { dataset: { csrf: "X-CityPulse-CSRF" } }, hidden: false,
+    getElementById: (id) => byId[id] || null, body, activeElement: null, documentElement: { dataset: { csrf: "X-CityPulse-CSRF" } }, hidden: false,
     addEventListener() {},
   };
   globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };

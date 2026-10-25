@@ -3,9 +3,9 @@ import { lineChart } from "/static/charts.js";
 import { currentCity, setCity, withCity } from "/static/cities.js";
 import { deleteCityControl, LEGACY_TEXT } from "/static/citydelete.js";
 import { prettyDistrict } from "/static/districts.js";
-import { agoSeconds, duration, showError, showLoading } from "/static/fmt.js";
+import { agoSeconds, duration, loadError } from "/static/fmt.js";
 import { can } from "/kit/session.js";
-import { $, fill, h } from "/kit/ui.js";
+import { $, errorState, fill, h, loading } from "/kit/ui.js";
 
 const LABEL = { operational: "All systems operational", degraded: "Degraded", partial_outage: "Partial outage", major_outage: "Major outage" };
 let timer = null;
@@ -126,7 +126,7 @@ async function draw(view) {
   let s, hist;
   const scoped = currentCity();
   try { [s, hist] = await Promise.all([api(withCity("/api/status")), api(withCity("/api/history?minutes=60"))]); } catch (err) {
-    if (!view.loaded) showError(body, err, () => { showLoading(body); render(view); });   // first paint failed: say so, never leave it blank
+    if (!view.loaded) errorState(body, loadError(err), () => { loading(body); render(view); });   // first paint failed: say so, never leave it blank
     return;
   }
   if (scoped !== currentCity()) return;                          // the city changed while loading: a newer render is on its way
@@ -161,11 +161,11 @@ export async function initOverview() {
   const box = $("view-overview");
   clearInterval(timer);
   if (!catalog) {
-    showLoading(box);
-    try { catalog = await api("/api/catalog"); } catch (err) { showError(box, err, initOverview); return; }
+    loading(box);
+    try { catalog = await api("/api/catalog"); } catch (err) { errorState(box, loadError(err), initOverview); return; }
   }
   const view = { head: h("div"), actions: h("div", { class: "overview-actions" }), body: h("div"), loaded: false };
-  showLoading(view.body);
+  loading(view.body);
   fill(box, view.head, view.actions, view.body);
   await render(view);
   timer = setInterval(() => { if (document.hidden || location.hash.slice(1).split("/")[0] !== "overview" && location.hash !== "") return; render(view); }, 5000);

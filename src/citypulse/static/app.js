@@ -2,12 +2,12 @@ import { api } from "/kit/api.js";
 import { initBurst } from "/static/burst.js";
 import { onCityChange, renderCityPicker } from "/static/cities.js";
 import { initConnect } from "/static/connect.js";
-import { showError, showLoading } from "/static/fmt.js";
+import { loadError } from "/static/fmt.js";
 import { initOverview, stopOverview } from "/static/overview.js";
 import { initSensors } from "/static/sensors.js";
-import { can, refreshSession, renderLogin, renderSetup, state } from "/kit/session.js";
+import { bootSession, can, renderLogin, renderSetup, state } from "/kit/session.js";
 import { initSettings } from "/static/settings.js";
-import { $, h } from "/kit/ui.js";
+import { $, errorState, h, loading } from "/kit/ui.js";
 
 const TABS = ["overview", "sensors", "burst", "connect", "settings"];
 const INIT = { overview: initOverview, sensors: initSensors, burst: initBurst, connect: initConnect, settings: initSettings };
@@ -17,25 +17,21 @@ const SECTIONS = ["auth-card", "nav", "city-picker", "signout", ...TABS.map((t) 
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
 
-function showUnavailable(err) {
-  hideAll();
-  $("auth-card").replaceChildren(
-    h("img", { class: "hero-logo", src: "/static/logo.svg", alt: "", width: "72", height: "72" }),
-    h("h1", {}, "CityPulse can't be reached"),
-    h("p", { class: "muted" }, err.message),
-    h("p", { class: "hint" }, "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry."),
-    h("button", { class: "primary", type: "button", onclick: () => boot() }, "Retry"));
-  $("auth-card").hidden = false;
-}
+const PAUSED_HINT = "If this server runs on a platform that pauses idle apps, resume it first (for AgentPG: agentpg sandbox resume <sandbox-id>), then retry.";
 
 async function boot(notice = "") {
   hideAll();
   stopOverview();
-  let s;
-  try { s = await refreshSession(); } catch (err) { showUnavailable(err); return; }
-  if (s.state === "setup_required") renderSetup(() => boot(), "CityPulse");
-  else if (s.state === "logged_out") renderLogin(() => boot(), notice, "CityPulse");
-  else showApp();
+  const card = $("auth-card");
+  card.hidden = false;
+  // onReady also runs after a successful "Try again", so a retry lands in the app instead of an empty card.
+  const onReady = (s) => {
+    if (s.state === "setup_required") renderSetup(() => boot(), "CityPulse");
+    else if (s.state === "logged_out") renderLogin(() => boot(), notice, "CityPulse");
+    else showApp();
+  };
+  const s = await bootSession(card, { text: "Connecting to CityPulse\u2026", onReady });   // Loading while single sign-on settles; error + Try again if it cannot be reached
+  if (!s) card.append(h("p", { class: "hint" }, PAUSED_HINT));
 }
 
 let pickerReady = false;
@@ -60,8 +56,8 @@ function route() {
   for (const t of TABS) $("view-" + t).hidden = t !== tab;
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === tab);
   const box = $("view-" + tab);
-  if (!box.firstChild) showLoading(box);         // after sign-in the first data takes a moment: never a blank page
-  const start = () => Promise.resolve(INIT[tab](tab === "sensors" ? arg : undefined)).catch((err) => { if (state.session) showError(box, err, start); });
+  if (!box.firstChild) loading(box);         // after sign-in the first data takes a moment: never a blank page
+  const start = () => Promise.resolve(INIT[tab](tab === "sensors" ? arg : undefined)).catch((err) => { if (state.session) errorState(box, loadError(err), start); });
   start();
 }
 

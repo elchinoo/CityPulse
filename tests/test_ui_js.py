@@ -52,6 +52,20 @@ def test_first_paint_states_durations_and_the_simulator_tile():
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
 
 
+def test_revoking_a_token_asks_through_the_kit_dialog():
+    """Settings uses confirmDialog under <body>: Cancel/Escape send nothing, Revoke sends one DELETE, no native dialog."""
+    env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
+    r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "revoke_dialog.mjs")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+def test_scripts_never_use_native_dialogs(script):
+    """window.confirm/alert/prompt cannot be styled and freeze browser tests: the kit's confirmDialog/promptDialog instead."""
+    assert not re.search(r"(?<![\w.])(?:window\.)?(?:confirm|alert|prompt)\s*\(", script.read_text())
+
+
 def test_the_page_stays_under_a_strict_csp():
     html = (APP_STATIC / "index.html").read_text()
     assert "<script>" not in html and " onclick=" not in html and "style=" not in html
