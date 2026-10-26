@@ -5,7 +5,7 @@ import { deleteCityControl, LEGACY_TEXT } from "/static/citydelete.js";
 import { prettyDistrict } from "/static/districts.js";
 import { agoSeconds, duration, loadError } from "/static/fmt.js";
 import { can } from "/kit/session.js";
-import { $, errorState, fill, h, loading } from "/kit/ui.js";
+import { $, errorState, fill, h, loading, scrollRegion } from "/kit/ui.js";
 
 const LABEL = { operational: "All systems operational", degraded: "Degraded", partial_outage: "Partial outage", major_outage: "Major outage" };
 let timer = null;
@@ -43,6 +43,9 @@ function kpis(s) {
     sim ? h("div", { class: `kpi ${sim.running ? "ok" : "warn"}` }, h("b", {}, sim.running ? `${sim.buffer.toLocaleString()}` : "–"), h("span", {}, `Simulator buffer · ${simText}`)) : null);
 }
 
+// A column that holds only a bar has no visible title; screen readers still get one (no empty header cells).
+const hiddenTh = (text) => h("th", {}, h("span", { class: "sr-only" }, text));
+
 function heatmap(s) {
   const cell = new Map(s.matrix.map((m) => [`${m.district}|${m.type}`, m]));
   const present = new Set(s.matrix.map((m) => m.type));
@@ -50,7 +53,7 @@ function heatmap(s) {
   const names = new Map(s.districts.map((d) => [d.key, d.label]));
   const present_d = new Set(s.matrix.map((m) => m.district));
   const rows = [...present_d].sort().map((id) => ({ id, name: names.get(id) || prettyDistrict(id) }));
-  const head = h("tr", {}, h("th", {}), ...types.map((t) => h("th", { class: "type", title: `${t.label} (${t.unit})` }, h("span", {}, t.label))));
+  const head = h("tr", {}, hiddenTh("District"), ...types.map((t) => h("th", { class: "type", title: `${t.label} (${t.unit})` }, h("span", {}, t.label))));
   const body = rows.map((d) => h("tr", {}, h("th", { class: "row", scope: "row" }, d.name),
     ...types.map((t) => {
       const m = cell.get(`${d.id}|${t.key}`);
@@ -68,20 +71,20 @@ function heatmap(s) {
 
 function typeTable(s) {
   const rows = [...s.types].sort((a, b) => a.ok / a.total - b.ok / b.total);
-  return h("div", { class: "card flush" }, h("table", {},
-    h("thead", {}, h("tr", {}, ...["Sensor type", "Sensors", "Health", "", "Stale", "Offline", "Fault", "Stuck"].map((t) => h("th", {}, t)))),
+  return scrollRegion(h("div", { class: "card flush" }, h("table", {},
+    h("thead", {}, h("tr", {}, ...["Sensor type", "Sensors", "Health", "Health bar", "Stale", "Offline", "Fault", "Stuck"].map((t) => (t === "Health bar" ? hiddenTh(t) : h("th", {}, t))))),
     h("tbody", {}, ...rows.map((t) => h("tr", { class: "clickable", onclick: () => { location.hash = `#sensors/-/${t.key}`; } },
       h("td", { class: "title" }, t.label), h("td", { class: "num" }, t.total.toLocaleString()), h("td", { class: "num" }, pct(t.ok / t.total)),
       h("td", {}, bar(t.ok / t.total)), h("td", { class: "num" }, t.stale || ""), h("td", { class: "num" }, t.offline || ""),
-      h("td", { class: "num" }, t.fault || ""), h("td", { class: "num" }, t.stuck || ""))))));
+      h("td", { class: "num" }, t.fault || ""), h("td", { class: "num" }, t.stuck || "")))))), "Sensor types");
 }
 
 function protocolTable(s) {
   if (!s.protocols || s.protocols.length < 2) return null;
-  return h("div", { class: "card flush" }, h("table", {},
-    h("thead", {}, h("tr", {}, ...["Collected through", "Sensors", "Health", ""].map((t) => h("th", {}, t)))),
+  return scrollRegion(h("div", { class: "card flush" }, h("table", {},
+    h("thead", {}, h("tr", {}, ...["Collected through", "Sensors", "Health", "Health bar"].map((t) => (t === "Health bar" ? hiddenTh(t) : h("th", {}, t))))),
     h("tbody", {}, ...s.protocols.map((p) => h("tr", {}, h("td", { class: "title" }, p.label), h("td", { class: "num" }, p.total.toLocaleString()),
-      h("td", { class: "num" }, pct(p.ok / p.total)), h("td", {}, bar(p.ok / p.total)))))));
+      h("td", { class: "num" }, pct(p.ok / p.total)), h("td", {}, bar(p.ok / p.total))))))), "Collection protocols");
 }
 
 // A deployment upgraded from before cities were mandatory may still hold sensors in the retired city. Say so, and offer the way out.
@@ -97,13 +100,13 @@ function legacyNotice(id, scoped) {
 function worstCities(out) {
   if (!out || out.total < 2) return null;
   const rows = out.cities.filter((c) => c.counts.ok < c.total);
-  return h("div", { class: "card flush" }, h("div", { class: "row pad" }, h("h2", { class: "section-title" }, "Cities needing attention"),
+  return scrollRegion(h("div", { class: "card flush" }, h("div", { class: "row pad" }, h("h2", { class: "section-title" }, "Cities needing attention"),
     h("span", { class: "muted" }, `${out.total.toLocaleString()} cities; pick one in the City menu to drill in`)),
-  rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["City", "Sensors", "Health", "", "Worst", "Down"].map((t) => h("th", {}, t)))),
+  rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["City", "Sensors", "Health", "Health bar", "Worst", "Down"].map((t) => (t === "Health bar" ? hiddenTh(t) : h("th", {}, t))))),
     h("tbody", {}, ...rows.map((c) => h("tr", { class: "clickable", onclick: () => setCity(c.city) },
       h("td", { class: "title" }, c.city), h("td", { class: "num" }, c.total.toLocaleString()), h("td", { class: "num" }, pct(c.health)),
       h("td", {}, bar(c.health)), h("td", {}, h("span", { class: `st ${c.worst_status}` }, c.worst_status)), h("td", { class: "num" }, (c.total - c.counts.ok).toLocaleString()))))) :
-    h("p", { class: "empty" }, "Every city is healthy."));
+    h("p", { class: "empty" }, "Every city is healthy.")), "Cities needing attention");
 }
 
 // The page has three regions. `head` and `body` are redrawn by every refresh and hold no input. `actions` holds the delete-city
