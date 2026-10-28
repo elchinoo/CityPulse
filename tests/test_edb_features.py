@@ -161,6 +161,31 @@ def test_hardening_is_idempotent_and_reapplied_after_a_new_grant(roles):
         ro.execute("SELECT * FROM api_token")
 
 
+def test_grants_after_startup_are_reasserted_and_reported(client, roles):
+    """`agentpg db-users create` re-grants SELECT on base tables after the migrate hook ran: the re-assert tick closes them again."""
+    from apgkit import masking
+    _like_agentpg()
+    deny = list(hardening.SECRET_TABLES)
+    with connect() as c:
+        c.execute("GRANT SELECT ON api_token, web_session TO a1p_readonly")
+        c.commit()
+    with _ro() as ro:
+        assert ro.execute("SELECT count(*) AS n FROM api_token").fetchone()["n"] == 0        # open: the failure being fixed
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=deny, metrics=core.metrics)
+    st = masking.status()
+    assert st["ok"] and st["drift"] == 2 and st["last_ok"]
+    with _ro() as ro:
+        for table in deny:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                ro.execute(f"SELECT * FROM {table}")                                       # noqa: S608
+        ro.execute("SELECT * FROM sensor")                                                  # the fleet data stays readable
+    assert masking.reassert_tick(core.db.connect, hardening.apply, deny=deny, metrics=core.metrics)
+    assert masking.status()["drift"] == 0
+    assert "masking_drift_tables" in core.metrics.render()[0].decode()
+    r = client.get("/readyz")
+    assert r.status_code == 200 and r.json()["status"] == "ready" and r.json()["masking"]["ok"] is True
+
+
 def test_hardening_skips_quietly_without_the_role_and_for_missing_tables(roles):
     with connect() as c:
         assert hardening.deny_secret_tables(c, role="cp_no_such_role") == {"applied": False, "reason": "role cp_no_such_role does not exist", "tables": {}}

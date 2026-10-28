@@ -9,6 +9,7 @@ from typing import Any
 
 import psycopg
 from apgkit import insights as kit_insights
+from apgkit import masking
 from apgkit.auth import TokenError
 from apgkit.auth.rp import safe_return_to
 from apgkit.config import env_bool
@@ -27,6 +28,7 @@ from . import (
     explain,
     gateway,
     geo,
+    hardening,
     memory,
     metrics,
     otlp,
@@ -44,6 +46,7 @@ from .db import connect
 
 STATIC = Path(__file__).resolve().parent / "static"
 MAX_BODY = 2 * 1024 * 1024
+MASKING_EVERY = 300          # seconds between masking re-asserts (apgkit.masking.reassert_forever)
 _announced = False
 
 
@@ -74,6 +77,10 @@ async def lifespan(_: FastAPI):
         _startup_tasks()
         tasks.append(asyncio.create_task(status.run_forever()))
         tasks.append(asyncio.create_task(geo.run_forever()))
+        # Grants made after startup (`agentpg db-users create`, default privileges) reopen the secret tables to the read-only role:
+        # re-assert every 5 minutes. Only where the database hardening runs (the migrate step of roles api and all).
+        tasks.append(asyncio.create_task(masking.reassert_forever(
+            core.db.connect, hardening.apply, MASKING_EVERY, deny=list(hardening.SECRET_TABLES), metrics=core.metrics)))
         rep = reporter.maybe_start()
         if rep:
             tasks.append(asyncio.create_task(rep.run()))
@@ -84,6 +91,7 @@ async def lifespan(_: FastAPI):
     finally:
         for t in tasks:
             t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # --- authentication -------------------------------------------------------------------------
@@ -128,7 +136,8 @@ def readyz():
     try:
         with connect(retries=1) as conn:
             conn.execute("SELECT 1")
-        return {"status": "ready"}
+        # masking: report only (last re-assert, tables found open before it); drift never makes the app unready
+        return {"status": "ready", "masking": masking.status()}
     except Exception:  # noqa: BLE001 - database may be waking; never echo connection details
         return JSONResponse({"status": "waking-database"}, status_code=503)
 

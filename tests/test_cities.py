@@ -249,7 +249,8 @@ def test_cities_endpoint_search_paging_and_bounds(client):
     login(client)
     gateway.accept([reading(i, city=f"{p}{i % 4}") for i, p in enumerate(["ab", "ab", "ab", "ab", "abc", "b", "b_x", "bxx"] * 5)])
     names = [c["city"] for c in client.get("/api/cities?limit=200").json()["cities"]]
-    assert names == sorted(names)
+    with connect() as c:       # sorted in the database's own collation (en_US orders '_' and digits differently from Python's code-point sort)
+        assert names == [r["city"] for r in c.execute("SELECT DISTINCT city FROM sensor ORDER BY city")]
     assert client.get("/api/cities?q=ab").json()["total"] == len([n for n in names if n.startswith("ab")])
     assert all(c["city"].startswith("ab") for c in client.get("/api/cities?q=AB").json()["cities"])    # case-insensitive
     under = [c["city"] for c in client.get("/api/cities?q=b_").json()["cities"]]

@@ -208,7 +208,7 @@ def test_builtin_seed_covers_every_city_and_district_with_valid_wkt():
 
 def test_the_kit_is_new_enough_for_insights_and_masking():
     import apgkit
-    assert tuple(int(x) for x in apgkit.__version__.split(".")[:3]) >= (0, 3, 0)
+    assert tuple(int(x) for x in apgkit.__version__.split(".")[:3]) >= (0, 3, 1)
     from apgkit import insights, masking, migrate
     assert hasattr(insights, "insights_payload") and hasattr(masking, "mask_view")
     assert "after_migrate" in migrate.run.__code__.co_varnames or "after_migrate" in migrate.run.__kwdefaults__
