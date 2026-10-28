@@ -107,7 +107,7 @@ def test_insights_metrics_are_exported_and_never_fail_a_scrape(client):
 def roles():
     with connect() as c:
         c.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='a1p_readonly') THEN CREATE ROLE a1p_readonly NOLOGIN; END IF; END $$")
-        c.execute(f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{LOGIN}') THEN CREATE ROLE {LOGIN} LOGIN; END IF; END $$")
+        c.execute(f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{LOGIN}') THEN CREATE ROLE {LOGIN} LOGIN PASSWORD 'ro-pw-test'; END IF; END $$")
         c.execute(f"GRANT a1p_readonly TO {LOGIN}")
         c.commit()
 
@@ -123,7 +123,7 @@ def _like_agentpg():
 
 
 def _ro():
-    return psycopg.connect(make_conninfo(TEST_URL, user=LOGIN), row_factory=dict_row, autocommit=True)
+    return psycopg.connect(make_conninfo(TEST_URL, user=LOGIN, password="ro-pw-test"), row_factory=dict_row, autocommit=True)
 
 
 def test_read_only_role_reads_the_fleet_but_not_the_secrets(client, roles):
