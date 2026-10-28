@@ -20,6 +20,8 @@ TOKEN_PREFIX = "cp_"
 
 db = Database(pool_max=10)
 metrics = metrics_mod.Metrics(APP, __version__)
+# db_insights_* gauges at /metrics (statistics from edb_stat_monitor / pg_stat_statements, cached 30 s; db_insights_available 0 where unreadable).
+metrics.add_insights_collector(lambda: db.connect(retries=1), top=5, min_calls=5, ttl=30)
 
 ALL = frozenset({"*"})
 PERMISSIONS = {

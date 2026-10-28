@@ -1,11 +1,16 @@
 # CityPulse
 
-A smart-city sensor platform on plain Postgres. Thousands of simulated sensors report through a real collection
+A smart-city sensor platform on Postgres (plain Postgres is enough; PostGIS, EDB's query insights and AgentPG's read-only hardening light up where the platform offers them). Thousands of simulated sensors report through a real collection
 path, a status engine turns their readings into a city-wide verdict, and a **burst button** stresses the whole
 thing on purpose so you can watch a monitoring tool such as [PagerLens](https://github.com/elchinoo/PagerLens)
 find, explain and report the incident.
 
 It is a sample project: small enough to read in an afternoon, built to be extended, and safe to expose publicly.
+
+**Documentation:** the complete [guide](docs/GUIDE.md) (ecosystem integration, architecture, install, configuration, operations,
+troubleshooting) and a [tutorial video script](docs/VIDEO-SCRIPT.md). EDB and AgentPG features: the [Map](docs/GUIDE.md#78-map-tab-postgis)
+(PostGIS), [database insights](docs/GUIDE.md#79-insights-tab-admin), [read-only and AI hardening](docs/GUIDE.md#710-what-a-read-only-user-and-agentpgs-restricted-mcp-can-see)
+and the [list of EDB and AgentPG capabilities this app uses](docs/GUIDE.md#edb-and-agentpg-capabilities-used-by-this-app).
 
 ```
  sensors / OTel Collector ──HTTP──▶ ┌──────────────┐   ┌──────────────────────────┐
@@ -22,6 +27,10 @@ It is a sample project: small enough to read in an afternoon, built to be extend
   speed radars, plus wind, pressure, UV, air quality, CO₂, noise, soil moisture, water level/flow/pressure, power
   meters, street lights, gas leaks, waste bins, bridge vibration, seismic, pedestrians, bike-share, EV chargers and
   parking bays. See `src/citypulse/catalog.py`.
+* **A map** (PostGIS): district polygons coloured by health and the sensors, drawn as inline SVG; `GET /api/sensors/nearby`
+  and `GET /api/districts/geojson`. Readings may carry optional `lat` and `lon`. Without PostGIS the map says so and nothing else changes.
+* **Database insights** (admin): top queries, tuning and index hints from EDB's extensions where installed, honestly "not
+  available" elsewhere; the secrets tables are closed to AgentPG's read-only role and so to its restricted MCP server.
 * **Seven bursts**, individually or all at once, that end by themselves: `flood`, `noise`, `dropout`, `stuck`,
   `late`, `corrupt`, `slow_db`.
 
@@ -154,6 +163,7 @@ Bad items are rejected one by one and counted (`{"accepted":…,"rejected":…,"
 `ts` is optional (epoch seconds or milliseconds, or ISO 8601; up to 24 h old). **HTTP 429 with `Retry-After`** means
 the gateway is saturated: keep the batch and retry with backoff, which is what the simulator does. A sensor's type and
 district and city are fixed by its first reading. `city` is required on every reading, see **Cities**.
+A reading may also carry `lat` and `lon` (decimal degrees, together; OTLP attributes of the same names): the Map and `GET /api/sensors/nearby` use them (guide 7.8).
 
 **OpenTelemetry** (OTLP/HTTP, protobuf or JSON, gzip accepted) at `POST /v1/metrics`. Gauge and sum data points become
 readings. Identity comes from the attributes `sensor.id`, `sensor.type` (or a metric named after the type) and

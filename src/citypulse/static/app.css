@@ -123,3 +123,17 @@ button.burst:hover { filter: brightness(1.08); }
 .city-delete-panel { margin: .5rem 0; max-width: 40rem; }
 .city-delete-panel input { width: 100%; box-sizing: border-box; margin: .4rem 0; }
 
+
+/* Map */
+.map-card { padding: .6rem; }
+.map-svg { width: 100%; height: auto; max-height: 70vh; display: block; background: var(--bg); border-radius: 10px; }
+.map-svg .district { cursor: pointer; outline: none; }
+.map-svg .district .area { stroke: var(--surface); stroke-width: 1.5; fill: var(--cell-off); fill-opacity: .85; }
+.map-svg .district.h0 .area { fill: var(--bad); } .map-svg .district.h1 .area { fill: #ea580c; } .map-svg .district.h2 .area { fill: var(--amber); }
+.map-svg .district.h3 .area { fill: #84cc16; } .map-svg .district.h4 .area { fill: var(--good); }
+.map-svg .district:hover .area { fill-opacity: 1; }
+.map-svg .district:focus-visible .area { stroke: var(--text); stroke-width: 3; fill-opacity: 1; }
+.map-svg .area-name { fill: var(--text); font-size: 11px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; pointer-events: none; }
+.map-svg .pt { stroke: var(--surface); stroke-width: 1; fill: var(--good); }
+.map-svg .pt.st-stale { fill: var(--amber); } .map-svg .pt.st-offline { fill: var(--off); } .map-svg .pt.st-fault { fill: var(--bad); } .map-svg .pt.st-stuck { fill: #9333ea; }
+.heat-key.none { background: var(--cell-off); }

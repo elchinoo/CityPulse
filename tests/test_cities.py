@@ -341,7 +341,7 @@ def test_upgrade_from_the_schema_before_cities(tmp_path):
         c.commit()
         assert "city" not in {r["column_name"] for r in c.execute(
             "SELECT column_name FROM information_schema.columns WHERE table_name='sensor'")}
-    assert migrate.run() == ["003_city.sql", "004_no_default_city.sql"]
+    assert migrate.run() == ["003_city.sql", "004_no_default_city.sql", "005_position.sql"]
     assert migrate.run() == []                                     # idempotent
     with connect() as c:
         assert c.execute("SELECT count(*) AS n FROM sensor WHERE city = 'default'").fetchone()["n"] == 50
@@ -390,7 +390,7 @@ def legacy_database(tmp_path, sensors=50):
 
 def test_upgrade_keeps_legacy_default_sensors_readable_and_flagged(client, tmp_path):
     legacy_database(tmp_path)
-    assert migrate.run() == ["004_no_default_city.sql"]            # drops the column default only
+    assert migrate.run() == ["004_no_default_city.sql", "005_position.sql"]            # drops the column default only
     assert migrate.run() == []
     with connect() as c:
         assert c.execute("SELECT count(*) AS n FROM sensor WHERE city='default'").fetchone()["n"] == 50    # nothing was deleted

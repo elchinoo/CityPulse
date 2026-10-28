@@ -200,6 +200,25 @@ def test_setup_is_not_offered_when_federated_and_local_login_can_be_turned_off(c
     assert client.post("/api/login", json={"password": "whatever-it-is"}, headers=CSRF).status_code == 403
 
 
+def test_purely_federated_instance_has_no_local_login_until_an_sso_admin_sets_a_password(client, monkeypatch):
+    """No setup code under SSO, so no local admin password exists. Break-glass is created by a signed-in SSO admin (Settings)."""
+    s = client.get("/api/session").json()
+    assert s["state"] == "logged_out" and s["has_admin_password"] is False
+    assert s["password_login"] is False and s["key_login"] is False                          # nothing to type: only the SSO button
+    assert client.post("/api/login", json={"password": "citypulse-break-glass-1"}, headers=CSRF).status_code == 401
+    # The setup code is never printed when federated, so the setup route cannot be completed by anyone.
+    assert client.post("/api/setup", json={"code": "AAAA-BBBB-CCCC", "password": "citypulse-break-glass-1"}, headers=CSRF).status_code == 403
+    admin = access(sub="usr_9", roles=["citypulse:admin"])
+    assert client.post("/api/admin-password", headers=admin, json={"new": "citypulse-break-glass-1"}).status_code == 200
+    s = client.get("/api/session").json()
+    assert s["has_admin_password"] is True and s["password_login"] is True                   # the break-glass now exists
+    assert client.post("/api/login", json={"password": "citypulse-break-glass-1"}, headers=CSRF).status_code == 200
+    assert client.get("/api/session").json()["user"]["permissions"] == ["*"]
+    monkeypatch.setattr(api, "fed", Federation(ISS, AUD, core.auth.verifier, api.fed.rp, False))
+    s = client.get("/api/session").json()
+    assert s["password_login"] is False and s["key_login"] is False                          # CITYPULSE_LOCAL_LOGIN=false hides it again
+
+
 def test_a_federated_session_ends_when_sessions_are_cleared(client):
     r = client.get("/auth/login", follow_redirects=False)
     q = parse_qs(urlsplit(r.headers["location"]).query)

@@ -35,7 +35,8 @@ async function showDetail(detail, listView, id) {
     h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { class: "section-title" }, s.id), h("span", { class: `st ${s.status}` }, s.status)),
       h("dl", { class: "facts" }, h("dt", {}, "Type"), h("dd", {}, s.type), h("dt", {}, "City"), h("dd", {}, s.city), h("dt", {}, "District"), h("dd", {}, s.district), h("dt", {}, "Protocol"), h("dd", {}, (s.protocol || "").replace("_", " ")),
         h("dt", {}, "Last value"), h("dd", {}, String(s.last_value)), h("dt", {}, "Last reading"), h("dd", {}, ago(s.last_ts)),
-        h("dt", {}, "Verdict"), h("dd", {}, s.reason || "healthy"), h("dt", {}, "Since"), h("dd", {}, ago(s.status_since))),
+        h("dt", {}, "Verdict"), h("dd", {}, s.reason || "healthy"), h("dt", {}, "Since"), h("dd", {}, ago(s.status_since)),
+        s.lat == null ? null : [h("dt", {}, "Position"), h("dd", {}, `${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}`)]),
       spark(s.readings)),
     h("div", { class: "card flush" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Event time"), h("th", { class: "num" }, "Value"))),
       h("tbody", {}, ...s.readings.slice(0, 20).map((r) => h("tr", {}, h("td", {}, new Date(r.ts).toLocaleTimeString()), h("td", { class: "num" }, String(r.value))))))));
@@ -59,6 +60,7 @@ export async function initSensors(arg = []) {
   };
   const q = h("input", { id: "f-q", placeholder: "sensor id contains…", maxlength: "64" });
   if (type && type !== "-") { typeSel.value = type; stateSel.value = "all"; }
+  else if (district && district !== "-") stateSel.value = "all";           // a link from the Map: every sensor of that district, healthy or not
   const out = h("div", { class: "card flush" });
   const draw = async () => {
     const p = new URLSearchParams({ state: stateSel.value, limit: "200" });

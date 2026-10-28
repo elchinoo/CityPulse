@@ -1,0 +1,210 @@
+## 1 bf_isabella
+This is CityPulse.
+
+It is a sample smart city, running entirely on Postgres.
+
+Thousands of sensors report in. The app decides whether the city is healthy.
+
+And a big red button lets you break things on purpose.
+
+We built it so a monitoring tool can practise finding a real incident.
+
+You will start it, read it, and feed it your own data.
+
+Then you will break it.
+
+## 2 bf_isabella
+Starting it takes Docker, and one command.
+
+The first time, the app has no users. So it denies everything, and prints a one-time setup code in its log.
+
+Here is the code.
+
+Open the page, type the code, and choose an admin password.
+
+It needs at least twelve characters.
+
+The code lives only in memory, and changes on every restart. So nobody can guess a way in.
+
+In a company, you would sign in through an identity provider instead.
+
+## 3 bm_george
+Now the dashboard. This is the Overview, the page you land on after signing in.
+
+The banner at the top is the verdict for the whole city.
+
+Operational means at least ninety-seven percent of sensors are healthy.
+
+Below that, it is degraded. Below eighty-five percent, a partial outage. Below fifty, a major outage.
+
+The tiles count sensors by state.
+
+A sensor is stale after three missed reports, and offline after twelve.
+
+It is faulty when its value is physically impossible. And stuck when it repeats the same number.
+
+The heatmap crosses districts with sensor types. Hover over a cell, to see how many of its sensors are healthy.
+
+The two charts show health, and incoming readings, for the last hour.
+
+Nothing is smoothed. The status engine re-judges every sensor every ten seconds.
+
+Click a heatmap cell, and the Sensors tab opens for that district and type.
+
+## 4 bm_george
+The Sensors tab is where you drill down.
+
+By default, it shows only sensors with a problem. And right now, there are none.
+
+Switch the filter to all sensors, and search for part of a sensor name.
+
+Open one sensor, to see its last sixty readings.
+
+And the reason it was judged the way it was.
+
+## 5 bf_emma
+Next, your own data. We start with the Connect tab.
+
+It shows ready-made examples for pushing readings.
+
+Now, in Settings, we create an ingest token.
+
+It is shown once, and only a hash is stored. It can push readings, and nothing else.
+
+Now we send a batch, with curl.
+
+Every reading names its sensor, its type, and its district. And it names a city.
+
+On purpose, I left the city off one reading.
+
+Look at the answer.
+
+The app accepted four, and rejected one.
+
+It counted the bad one, and the hint tells you how to fix the sender.
+
+Bad data never fails the whole batch. And it is never silently lost.
+
+## 6 bf_emma
+Every sensor belongs to one city, fixed by its first reading.
+
+The City menu in the top bar filters every tab.
+
+Type a few letters, pick Lyon, and the Overview shows only that city.
+
+Choose all cities, and you are back to the whole picture.
+
+The card called cities needing attention lists them by severity, worst on top.
+
+## 7 bm_lewis
+Now the fun part. This is the burst tab.
+
+One press starts seven faults at once.
+
+A flood of readings. A slow database. And corrupt messages.
+
+Noisy sensors. Stuck sensors. And late data.
+
+And one whole district going dark.
+
+They stop by themselves after the time you choose, from one to ten minutes.
+
+Bursts only act on the built-in simulator, and on the gateway. Real sensors you connect are never altered.
+
+We keep three minutes. Now, press burst.
+
+Seven faults are active, and each one counts down.
+
+Nothing is visible yet. So let us go and watch the city.
+
+## 8 bm_lewis
+Back on the Overview, an amber banner says a burst is active.
+
+Nothing shows for the first half minute. So watch the verdict.
+
+[pause 5]
+
+The stale tile is the first to move.
+
+[pause 7]
+
+There it is. The verdict has slipped to degraded.
+
+The flood and the slow database fill the gateway's write slots.
+
+Readings queue up, and sensors start missing reports.
+
+Stale sensors climb first. Offline ones come later.
+
+The banner now names the worst sensor types, and later, the districts.
+
+Open Sensors, with the problems filter.
+
+The reason is simple: no reading for three or more intervals.
+
+Meanwhile, we push readings in parallel, twelve at once.
+
+The full gateway answers with a 429, with a Retry-After header.
+
+That is how it tells senders to back off, instead of running out of memory.
+
+Back on the Overview, the city keeps sliding.
+
+Corrupt messages show up as rejected readings. And late data lands in older chart buckets, which is itself a clue.
+
+Every symptom has a visible cause.
+
+## 9 bm_lewis
+To end it early, open the Burst tab, and press Stop everything.
+
+Now the backlog has to drain. That can take up to forty seconds.
+
+Watch the Overview.
+
+[pause 9]
+
+The simulator is draining its backlog.
+
+[pause 9]
+
+There. The verdict is operational again, and the burst banner is gone.
+
+Once readings flow again, sensors turn healthy on the next pass.
+
+Nothing is latched. So the verdict never lies about the present.
+
+## 10 bf_isabella
+Last topic: how CityPulse is watched, and where it fits.
+
+Create one more token, with the metrics scope only.
+
+First, the health endpoint. It needs no login.
+
+Then the metrics endpoint, with that token.
+
+It shows the fleet health ratio, the sensor counts, and the ingest counters.
+
+A monitoring tool such as PagerLens can scrape those.
+
+Or CityPulse can report its own health, and raise an alert for each degraded city.
+
+The Connect tab shows the snippets for both.
+
+In the full ecosystem, the CityPulse Simulator feeds it sensors.
+
+The identity provider signs people in, as admin, operator, or viewer.
+
+And PagerLens opens, and investigates, the incident.
+
+## 11 bf_isabella
+To recap. CityPulse keeps sensor data, judgement, and fault injection, in Postgres.
+
+You start it with one command. You feed it with scoped tokens.
+
+You read it on one dashboard. And you break it with one button.
+
+Try it yourself. Clone the project, and run docker compose up.
+
+Press the red button.
+
+Then read the guide in the docs folder, to connect it to PagerLens, and the rest of the fleet.

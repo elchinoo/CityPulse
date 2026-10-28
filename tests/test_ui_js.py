@@ -69,3 +69,27 @@ def test_scripts_never_use_native_dialogs(script):
 def test_the_page_stays_under_a_strict_csp():
     html = (APP_STATIC / "index.html").read_text()
     assert "<script>" not in html and " onclick=" not in html and "style=" not in html
+
+
+def test_map_tab_in_a_fake_dom():
+    """Inline SVG from GeoJSON: no inline style, classes for health, keyboard operable districts, a table as text alternative, a not-available card."""
+    env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
+    r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "map.mjs")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
+def test_map_and_insights_tabs_are_wired_with_the_right_permissions():
+    html, app = (APP_STATIC / "index.html").read_text(), (APP_STATIC / "app.js").read_text()
+    for tab in ("map", "insights"):
+        assert f'data-tab="{tab}"' in html and f'id="view-{tab}"' in html
+    assert 'from "/kit/insights.js"' in app and "initInsights($(\"view-insights\"), api)" in app
+    assert 'insights: "settings:manage"' in app and 'map: "city:read"' in app       # statement text is admin material; the map is plain dashboard data
+    assert "stopMap" in app
+    css = (APP_STATIC / "app.css").read_text()
+    assert ".map-svg .district.h0" in css and ".map-svg .pt.st-fault" in css
+
+
+def test_map_script_builds_svg_without_style_attributes_or_foreign_requests():
+    src = (APP_STATIC / "map.js").read_text()
+    assert "createElementNS" in src and not re.search(r"""["']style["']|\.style\b|https?://(?!www\.w3\.org/2000/svg)""", src)

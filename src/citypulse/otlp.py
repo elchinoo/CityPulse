@@ -109,6 +109,10 @@ def to_readings(data: dict) -> tuple[list[dict], int]:
                                  if v not in (None, "")), None)
                     if city is not None:
                         item["city"] = city
+                    for key in ("lat", "lon"):    # optional position (attributes lat and lon, decimal degrees); the gateway validates it
+                        v = point.get(key, res.get(key))
+                        if v is not None:
+                            item[key] = v
                     if ts:
                         item["ts"] = ts
                     items.append(item)

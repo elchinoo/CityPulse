@@ -43,7 +43,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "reset-admin":
         with connect() as conn:
             auth.reset_admin(conn)
-        print("Admin password cleared. Restart the server; it will print a new setup code.")
+        if os.environ.get("CITYPULSE_OIDC_ISSUER", "").strip():
+            print("Admin password cleared. Single sign-on is on, so no setup code is printed: sign in with SSO as an admin and set a new "
+                  "password under Settings, or sign in with CITYPULSE_API_KEY if one is configured.")
+        else:
+            print("Admin password cleared. Restart the server; it will print a new setup code.")
     else:
         sys.exit(2)
 

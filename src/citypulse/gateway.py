@@ -40,6 +40,8 @@ _bursts = chaos.Cache(lambda: _load_bursts())
 _known = {"count": 0, "at": 0.0}
 MISMATCH = "city does not match the sensor's city"
 CITY_REQUIRED = "city is required"
+COORDS_TOGETHER = "lat and lon must be sent together"
+COORDS_BAD = "lat must be within +-90 and lon within +-180 (decimal degrees)"
 CITY_RESERVED = f"city {LEGACY_CITY!r} is reserved (legacy); use a real city id"
 CITY_HINT = ('Every reading needs a "city" (a-z, 0-9, _ and -, up to 32 characters, e.g. "paris"). Fix: add "city": "<id>" to each '
              'reading (JSON); set the OTLP attribute city (resource or data point); built-in simulator: set CITYPULSE_CITY; '
@@ -90,9 +92,17 @@ def parse_ts(value, now: datetime) -> datetime:
     return min(ts, now)
 
 
-def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, str] | str:
-    """A cleaned (sensor, type, district, ts, value, protocol, city) tuple, or the reason it was rejected.
-    `city` is required: there is no default city."""
+def _coordinate(value, limit: float) -> float | None:
+    """A finite number within +-limit, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit:
+        return None
+    return float(value)
+
+
+def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, str, float | None, float | None] | str:
+    """A cleaned (sensor, type, district, ts, value, protocol, city, lat, lon) tuple, or the reason it was rejected.
+    `city` is required: there is no default city. `lat` and `lon` are optional and come together (decimal degrees, WGS 84):
+    both None when the sensor sent no position."""
     if not isinstance(item, dict):
         return "item is not an object"
     sensor, kind, district = item.get("sensor"), item.get("type"), item.get("district")
@@ -112,6 +122,13 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, 
     protocol = item.get("protocol", "http")
     if protocol not in PROTOCOLS:
         return "unknown protocol"
+    lat = lon = None
+    if item.get("lat") is not None or item.get("lon") is not None:
+        if item.get("lat") is None or item.get("lon") is None:
+            return COORDS_TOGETHER
+        lat, lon = _coordinate(item["lat"], 90), _coordinate(item["lon"], 180)
+        if lat is None or lon is None:
+            return COORDS_BAD
     value = item.get("value")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "value must be a number"
@@ -122,7 +139,7 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, 
         ts = parse_ts(item.get("ts"), now)
     except ValueError as exc:
         return str(exc)
-    return sensor, kind, district, ts, value, protocol, city
+    return sensor, kind, district, ts, value, protocol, city, lat, lon
 
 
 def accept(items: list) -> dict:
@@ -186,11 +203,13 @@ def _store(good: list, errors: dict) -> int:
             existing = {r["id"]: r["city"] for r in
                         conn.execute("SELECT id, city FROM sensor WHERE id = ANY(%s)", ([*{g[0] for g in good}],))}
             city_of = dict(existing)
-            latest, mismatched = {}, 0
+            latest, mismatched, xy = {}, 0, {}
             for g in good:  # one row per sensor for the state upsert: the newest event time wins
                 if city_of.setdefault(g[0], g[6]) != g[6]:   # a sensor's city is fixed by its first reading (also within one batch)
                     mismatched += 1
                     continue
+                if g[7] is not None:                          # the position of a sensor is the last one it sent in this batch
+                    xy[g[0]] = (g[7], g[8])
                 cur = latest.get(g[0])
                 if cur is None or g[3] >= cur[3]:
                     latest[g[0]] = g
@@ -219,16 +238,23 @@ def _store(good: list, errors: dict) -> int:
                     " last_value = CASE WHEN EXCLUDED.last_ts >= sensor.last_ts THEN EXCLUDED.last_value ELSE sensor.last_value END, "
                     " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()")
                 cols = [[r[k] for r in rows] for k in range(6)]
+                # Positions travel only in batches that have some (the simulator sends one every few dozen readings), so the usual
+                # upsert never touches lat/lon and the sensor updates stay HOT.
+                pos = [[xy[r[0]][k] if r[0] in xy else None for r in rows] for k in range(2)] if xy else []
+                if pos:
+                    head = head.replace("protocol, city) ", "protocol, city, lat, lon) ")
+                    tail += ", lat = coalesce(EXCLUDED.lat, sensor.lat), lon = coalesce(EXCLUDED.lon, sensor.lon)"
+                sel, arr, alias = (", u.lat, u.lon", ", %s::float8[], %s::float8[]", ", lat, lon") if pos else ("", "", "")
                 if len(cities) == 1:   # the usual batch: one city, passed as a scalar
-                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, %s::text "
-                                 "FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]) "
-                                 "AS u(id, type, district, ts, val, proto) " + tail, (cities[0], *cols))
+                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, %s::text" + sel
+                                 + " FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]" + arr
+                                 + ") AS u(id, type, district, ts, val, proto" + alias + ") " + tail, (cities[0], *cols, *pos))
                 else:                  # several cities: a small dictionary plus an int index per row
                     index = {c: i + 1 for i, c in enumerate(cities)}
-                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, (%s::text[])[u.ci] "
-                                 "FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[], %s::int[]) "
-                                 "AS u(id, type, district, ts, val, proto, ci) " + tail,
-                                 (cities, *cols, [index[r[6]] for r in rows]))
+                    conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, (%s::text[])[u.ci]" + sel
+                                 + " FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]" + arr
+                                 + ", %s::int[]) AS u(id, type, district, ts, val, proto" + alias + ", ci) " + tail,
+                                 (cities, *cols, *pos, [index[r[6]] for r in rows]))
     except PoolTimeout as exc:
         raise Overloaded("database connections are exhausted") from exc
     return refused

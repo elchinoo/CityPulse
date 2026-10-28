@@ -15,13 +15,14 @@ from datetime import datetime
 
 import httpx
 
-from . import chaos, gateway, metrics
+from . import chaos, gateway, geo, metrics
 from . import settings_store as store
 from .catalog import TYPES, build_fleet, hash_str
 from .config import get_settings, require_sim_city
 from .db import connect
 
 BATCH = 100
+POSITION_EVERY = 50      # a sensor repeats its position this often (the first reading carries it): a lost batch cannot lose it for good
 MAX_SENDS_PER_TICK = 8
 BUFFER_MAX = 100_000
 HEARTBEAT_KEY = "sim_heartbeat"
@@ -72,7 +73,7 @@ class HttpSink:
 
 
 class Sensor:
-    __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member")
+    __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member", "pos", "n")
 
     def __init__(self, sid: str, kind: str, district: str, rng: random.Random, city: str):
         t = TYPES[kind]
@@ -82,6 +83,8 @@ class Sensor:
         self.state = rng.random() < 0.5                       # parking occupancy
         self.frozen: float | None = None
         self.member = hash_str(sid) % 100                     # stable position for "a share of sensors" effects
+        self.pos = geo.sensor_position(city, district, sid)   # (lat, lon) inside its district, for a city with built-in geography
+        self.n = 0                                            # readings sent so far: the position goes along with every POSITION_EVERY-th
 
 
 def _reflect(v: float, lo: float, hi: float) -> float:
@@ -150,6 +153,9 @@ class Simulator:
             v = self.value(s, now, 1 + 2 * noise, 0.04 * noise)
         item = {"sensor": s.id, "type": s.type, "district": s.district, "city": s.city, "value": v,
                 "ts": round(now - 90 * late, 3)}
+        if s.pos and s.n % POSITION_EVERY == 0:
+            item["lat"], item["lon"] = s.pos
+        s.n += 1
         if corrupt and self.rng.random() < 0.08 * corrupt:
             item = self._corrupt(item)
         return item

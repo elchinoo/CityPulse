@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+from apgkit import insights as kit_insights
 from apgkit.auth import TokenError
 from apgkit.auth.rp import safe_return_to
 from apgkit.config import env_bool
@@ -17,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, chaos, core, gateway, metrics, otlp, purge, reporter, sim, status
+from . import __version__, chaos, core, gateway, geo, metrics, otlp, purge, reporter, sim, status
 from .catalog import CITY_ID, DISTRICT_ID, DISTRICTS, GROUPS, TYPES
 from .config import get_settings
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
@@ -462,6 +463,59 @@ def delete_city(city_id: str = PathParam(max_length=32, pattern=CITY_PATTERN)):
 _SENSOR_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
 
 
+# --- geography (PostGIS): the routes below answer {"available": false, "reason": ...} where PostGIS is not installed ---------
+# They must be declared before /api/sensors/{sensor_id}, which would otherwise take "nearby" and "geojson" for a sensor id.
+
+@app.get("/api/sensors/nearby", dependencies=[Depends(require("city:read"))])
+def sensors_nearby(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, le=180),
+                   radius_m: float = Query(1000, gt=0, le=1_000_000), limit: int = Query(20, ge=1, le=200), city: str | None = CityParam):
+    """Sensors with a position within `radius_m` metres of (lat, lon), nearest first, each with `distance_m` (ST_DWithin and
+    ST_Distance on geography). Optionally only one city."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return geo.nearby(conn, lat, lon, radius_m, limit, city)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/sensors/geojson", dependencies=[Depends(require("city:read"))])
+def sensors_geojson(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"), limit: int = Query(500, ge=1, le=2000),
+                    city: str | None = CityParam):
+    """Sensors that have a position, as a GeoJSON FeatureCollection of points (`matching` counts all that fit the filter)."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return geo.sensors_geojson(conn, city, state, limit)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/districts/geojson", dependencies=[Depends(require("city:read"))])
+def districts_geojson(city: str | None = CityParam):
+    """District polygons as a GeoJSON FeatureCollection. Each feature has the sensors inside it (decided by ST_Contains on the
+    sensor's position), their counts per status and `health` (ok share, null with no sensor inside). Only cities with sensors."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return geo.districts_geojson(conn, city)
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/insights", dependencies=[Depends(require("settings:manage"))])
+def insights_route(order: str = "total", limit: int = 20):
+    """Database insights (edb_stat_monitor or pg_stat_statements, edb_pg_tuner, query_advisor). Admin only: statement text can reveal
+    table names and the shape of the workload. A source that is missing or not readable says so in the payload."""
+    _api_role()
+    order = order if order in ("total", "mean", "calls") else "total"
+    try:
+        with connect(retries=1) as conn:
+            return kit_insights.insights_payload(conn, order, max(1, min(limit, 200)))
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
 @app.get("/api/sensors", dependencies=[Depends(require("city:read"))])
 def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"),
                  type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24, pattern=DISTRICT_ID.pattern),
@@ -503,6 +557,7 @@ def get_sensor(sensor_id: str):
         row = conn.execute("SELECT * FROM sensor WHERE id=%s", (sensor_id,)).fetchone()
         if not row:
             raise HTTPException(404, "no such sensor")
+        row.pop("geom", None)                          # the geography column (PostGIS) is binary; lat and lon carry the position
         row["readings"] = conn.execute(
             "SELECT ts, value FROM reading WHERE sensor_id=%s ORDER BY ts DESC LIMIT 60", (sensor_id,)).fetchall()
     return row

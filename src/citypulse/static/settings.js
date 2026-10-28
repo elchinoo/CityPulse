@@ -67,7 +67,9 @@ export async function initSettings() {
     h("p", { class: "muted" }, "Prefer the narrowest token. Sensors and collectors need only ingest; scrapers need only metrics."),
     h("div", { class: "card" }, tokenForm, tErr), reveal, table,
     h("h2", { class: "section-title" }, "Admin password"),
-    h("p", { class: "muted" }, "Changing it signs every browser out."),
+    h("p", { class: "muted" }, !has && session.sso
+      ? "Single sign-on is on and no local admin password exists. Set one as a break-glass for when the identity provider is down; it is the only local sign-in. Setting it signs every browser out."
+      : "Changing it signs every browser out."),
     h("div", { class: "card" }, pwForm));
   drawTokens();
 }

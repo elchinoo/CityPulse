@@ -10,3 +10,5 @@ __pycache__/
 dist/
 *.key
 *.pem
+docs/video/out/
+docs/video/node_modules/

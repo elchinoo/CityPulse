@@ -56,8 +56,9 @@ def test_validate_rejects_with_a_reason(patch, reason):
 
 def test_validate_accepts_and_normalises():
     now = datetime.now(UTC)
-    sensor, kind, district, ts, value, protocol, city = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
+    sensor, kind, district, ts, value, protocol, city, lat, lon = gateway.validate({**GOOD, "ts": time.time() * 1000 - 5000}, now)
     assert (sensor, kind, district, value, protocol, city) == ("temp-d01-0001", "temperature", "d01", 21.5, "http", "paris")
+    assert (lat, lon) == (None, None)
     assert 3 < (now - ts).total_seconds() < 9            # milliseconds epoch understood
     assert gateway.validate("not a dict", NOW) == "item is not an object"
     # a value past the physical limits is VALID input (it becomes a fault later), not a rejection

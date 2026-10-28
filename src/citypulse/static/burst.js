@@ -15,15 +15,15 @@ export async function initBurst() {
   const chaos = await api("/api/chaos");
   let districts = { list: [], total: 0 };         // the districts that really report (in the chosen city, else anywhere)
   try { districts = await loadDistricts(city); } catch { /* the target menu then offers no district */ }
-  const duration = h("select", { id: "storm-secs" }, ...[[60, "1 minute"], [180, "3 minutes"], [300, "5 minutes"], [600, "10 minutes"]].map(([v, t]) => h("option", { value: v, selected: v === 180 }, t)));
+  const lasts = h("select", { id: "storm-secs" }, ...[[60, "1 minute"], [180, "3 minutes"], [300, "5 minutes"], [600, "10 minutes"]].map(([v, t]) => h("option", { value: v, selected: v === 180 }, t)));
   const err = h("p", { class: "error", role: "alert" });
   const run = async (fn, ok) => { err.textContent = ""; try { await fn(); toast(ok); refresh(); } catch (e) { err.textContent = e.message; } };
 
   const big = h("div", { class: "card burst-big" },
-    h("button", { class: "burst", type: "button", onclick: () => run(() => api("/api/chaos/storm", { method: "POST", json: { seconds: Number(duration.value), ...(city ? { city } : {}) } }), city ? `Burst started in ${city}` : "Burst started") }, "BURST"),
+    h("button", { class: "burst", type: "button", onclick: () => run(() => api("/api/chaos/storm", { method: "POST", json: { seconds: Number(lasts.value), ...(city ? { city } : {}) } }), city ? `Burst started in ${city}` : "Burst started") }, "BURST"),
     h("div", {}, h("strong", {}, "Stress the city on purpose."),
       h("p", { class: "muted" }, "Seven faults at once: a flood of readings, a slow database, corrupt payloads, noisy and stuck sensors, late data, and one district going dark. With a city picked in the City menu, they hit that city only (the slow database still slows the whole gateway). They end by themselves. Run PagerLens beside CityPulse and watch it open an incident."),
-      h("div", { class: "row left" }, h("label", { for: "storm-secs" }, "Lasts"), duration,
+      h("div", { class: "row left" }, h("label", { for: "storm-secs" }, "Lasts"), lasts,
         h("button", { class: "secondary", type: "button", onclick: () => run(() => api("/api/chaos/stop", { method: "POST" }), "All bursts stopped") }, "Stop everything"))), err);
 
   const activeBox = h("div", { class: "card flush" });
@@ -51,7 +51,7 @@ export async function initBurst() {
   }
   fill(box, h("h1", {}, "Burst", city ? h("small", { class: "scope-chip" }, ` · ${city}`) : null), big, h("h2", { class: "section-title" }, "Active"), activeBox,
     h("h2", { class: "section-title" }, "Pick your own fault"), kinds,
-    h("p", { class: "hint" }, "Bursts bend the simulated fleet and the gateway. Real sensors you connect are never altered, only the simulator is."));
+    h("p", { class: "hint" }, "Bursts bend the built-in simulator and the gateway. Real sensors you connect are never altered. A separate CityPulse Simulator feels only the slow database (429 and back-off); give it its own burst percentage to break its data."));
   refresh();
   timer = setInterval(() => { if (location.hash.slice(1).split("/")[0] !== "burst") clearInterval(timer); else refresh(); }, 2000);
 }

@@ -25,6 +25,7 @@ const STATUS = (city) => ({
 });
 const calls = [];
 let sensorRows = [];
+let chaosActive = [];
 globalThis.fetch = async (url, init = {}) => {
   calls.push([init.method || "GET", url]);
   const u = String(url);
@@ -32,7 +33,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.startsWith("/api/catalog")) body = { districts: [{ id: "d01", name: "Harbor" }], groups: [], types: [{ key: "temperature", label: "Temperature", unit: "C" }] };
   else if (u.startsWith("/api/status")) body = STATUS(new URL(u, "http://x").searchParams.get("city"));
   else if (u.startsWith("/api/history")) body = { health: [], throughput: [] };
-  else if (u.startsWith("/api/chaos")) body = { active: [], kinds: { noise: "Noise." } };
+  else if (u.startsWith("/api/chaos")) body = { active: chaosActive, kinds: { noise: "Noise." } };
   else if (u === "/api/cities/oslo/districts") body = { city: "oslo", total: 2, limit: 200, districts: [{ id: "alder-quay", name: "Alder Quay", total: 5 }, { id: "north-mill", name: "North Mill", total: 2 }] };
   else if (u.startsWith("/api/cities")) body = { total: 1, limit: 12, offset: 0, legacy_city: null, cities: [{ city: "oslo", total: 7, counts: { ok: 5 }, health: 0.7, worst_status: "fault" }] };
   else if (u.startsWith("/api/sensors/")) body = { id: "oslo.t0", status: "ok", type: "temperature", city: "oslo", district: "alder-quay", protocol: "http", last_value: 1, last_ts: new Date().toISOString(), status_since: new Date().toISOString(), readings: [] };
@@ -82,9 +83,14 @@ const btn = (view, text) => view.all().find((e) => e.tag === "button" && e.textC
 // ---- Burst: target, level and duration menus beside the live "active" list -----------------------------------
 {
   location.hash = "#burst";
+  chaosActive = [{ id: 1, kind: "slow_db", target: "all", intensity: 3, seconds_left: 150 }];
   const { initBurst } = await import("/static/burst.js");
   await initBurst();
+  await new Promise((r) => setTimeout(r, 20));
   const v = views.burst;
+  // Regression: the "Lasts" menu once shadowed the duration formatter, so the Active list silently never drew.
+  assert.ok(v.find((e) => e.tag === "tr" && e.textContent.includes("slow db") && e.textContent.includes("3") && e.textContent.includes("3 min")),
+    "an active burst is listed with its time left");
   const target = v.find((e) => e.tag === "select" && e.attrs["aria-label"] === "noise target");
   const opts = target.all().filter((e) => e.tag === "option").map((e) => [e.value, e.textContent]);
   assert.ok(opts.some(([val, t]) => val === "district:alder-quay" && t === "Alder Quay"), "districts come from the selected city's sensors");
@@ -97,6 +103,7 @@ const btn = (view, text) => view.all().find((e) => e.tag === "button" && e.textC
   await btn(v, "Start").click();
   const post = calls.find(([m, u]) => m === "POST" && u === "/api/chaos");
   assert.ok(post, "starting a burst posts it");
+  chaosActive = [];
   timers.clear();
 }
 
