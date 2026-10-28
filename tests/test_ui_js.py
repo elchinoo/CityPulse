@@ -93,3 +93,18 @@ def test_map_and_insights_tabs_are_wired_with_the_right_permissions():
 def test_map_script_builds_svg_without_style_attributes_or_foreign_requests():
     src = (APP_STATIC / "map.js").read_text()
     assert "createElementNS" in src and not re.search(r"""["']style["']|\.style\b|https?://(?!www\.w3\.org/2000/svg)""", src)
+
+
+def test_explain_tab_in_a_fake_dom():
+    """One request per click, five models as text (metadata never parsed as HTML), honest not-available parts, the SQL under a disclosure."""
+    env = {**os.environ, "APP_STATIC": str(APP_STATIC), "KIT_STATIC": str(KIT_STATIC)}
+    r = subprocess.run([NODE, "--import", str(FAKEDOM / "register.mjs"), str(FAKEDOM / "explain.mjs")],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
+def test_explain_tab_is_wired_with_city_read():
+    html, app = (APP_STATIC / "index.html").read_text(), (APP_STATIC / "app.js").read_text()
+    assert 'data-tab="explain"' in html and 'id="view-explain"' in html
+    assert 'explain: "city:read"' in app and "initExplain" in app and '"explain"' in app
+    assert "createElementNS" in (APP_STATIC / "explain.js").read_text() and "style" not in re.findall(r"""setAttribute\(["'](\w+)""", (APP_STATIC / "explain.js").read_text())

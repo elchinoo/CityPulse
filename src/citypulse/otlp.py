@@ -113,6 +113,9 @@ def to_readings(data: dict) -> tuple[list[dict], int]:
                         v = point.get(key, res.get(key))
                         if v is not None:
                             item[key] = v
+                    meta = {k[6:]: v for k, v in attrs.items() if k.startswith("attrs.") and len(k) > 6}   # attrs.vendor, attrs.firmware ...
+                    if meta:
+                        item["attrs"] = meta                   # flat key/value pairs; the gateway validates them like the JSON field
                     if ts:
                         item["ts"] = ts
                     items.append(item)

@@ -137,3 +137,11 @@ button.burst:hover { filter: brightness(1.08); }
 .map-svg .pt { stroke: var(--surface); stroke-width: 1; fill: var(--good); }
 .map-svg .pt.st-stale { fill: var(--amber); } .map-svg .pt.st-offline { fill: var(--off); } .map-svg .pt.st-fault { fill: var(--bad); } .map-svg .pt.st-stuck { fill: #9333ea; }
 .heat-key.none { background: var(--cell-off); }
+
+/* ---- Explain: one statement, five models ---- */
+.explain .model { border-top: 1px solid var(--line); padding: .6rem 0 .2rem; }
+.explain .model h3 { margin: 0 0 .3rem; font-size: 1.02rem; }
+.explain .tag { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: .08rem .45rem; border-radius: 6px; background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--brand); }
+.explain .evidence { padding-left: 1.1rem; margin: .3rem 0; }
+.explain details.sqlview { margin-top: .8rem; border-top: 1px dashed var(--line); padding-top: .6rem; }
+.explain details.sqlview pre { max-height: 26rem; overflow: auto; font-size: .78rem; }

@@ -3,6 +3,8 @@
 `lo`/`hi` are the hard limits: a reading outside them is a sensor fault, not weather. The simulator draws normal
 values as `mean + amp * cos(2*pi*(hour - peak)/24) + noise`, clipped to the limits.
 """
+import datetime as dt
+import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -112,3 +114,43 @@ def hash_str(s: str) -> int:
     for ch in s:
         h = (h * 31 + ord(ch)) % 1_000_003
     return h
+
+
+# ---- device metadata of the built-in simulator's sensors (sensor.attrs, JSONB) --------------------------------------------------------
+# Plausible and deterministic: a pure function of the sensor id (sha256, like the geography), so every run, machine and Python version
+# gives the same vendor, firmware, install date, calibration and tags to the same sensor. Three vendors per sensor group; four firmware versions
+# per vendor with the oldest one in the minority, which is what a real fleet looks like and what the "Explain this district" card looks for.
+VENDORS = {
+    "weather": ["Aerolab", "Meteosense", "Nimbus Instruments"], "traffic": ["Urbanis", "Trafficon", "Carrefour Systems"],
+    "environment": ["Aerolab", "Ecoscan", "Nimbus Instruments"], "utilities": ["Hydrotek", "Gridwise", "Urbanis"],
+    "structures": ["Structa", "Seismix", "Gridwise"],
+}
+FIRMWARE = ["1.4.2", "2.0.1", "2.1.4", "2.2.0"]
+FIRMWARE_WEIGHTS = [0.12, 0.28, 0.40, 0.20]
+TAGS = ["roof", "pole", "kerb", "underground", "solar", "mains", "battery", "north", "south", "east", "west"]
+
+
+def _unit(*parts: object) -> float:
+    return int.from_bytes(hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()[:8], "big") / 2**64
+
+
+def sensor_attrs(sensor_id: str, kind: str, district: str) -> dict:
+    """The metadata of a built-in simulator sensor: vendor, firmware, install_date, calibration {offset, scale, date}, tags. Valid for the
+    gateway (check_attrs): fixed keys, two levels, small. Firmware depends on the vendor and the district's sensors skew slightly newer or older."""
+    vendors = VENDORS[TYPES[kind].group]
+    vendor = vendors[int(_unit(sensor_id, "vendor") * len(vendors))]
+    r, acc, firmware = _unit(sensor_id, vendor, "fw"), 0.0, FIRMWARE[-1]
+    for fw, w in zip(FIRMWARE, FIRMWARE_WEIGHTS):
+        acc += w
+        if r < acc:
+            firmware = fw
+            break
+    install = 18262 + int(_unit(sensor_id, "install") * 1800)          # day number: 2020-01-01 .. about 2024-12
+    cal = install + int(_unit(sensor_id, "cal") * 700)
+    def day(n: int) -> str:
+        return (dt.date(1970, 1, 1) + dt.timedelta(days=n)).isoformat()
+    tags = [TAGS[int(_unit(sensor_id, "tag", i) * len(TAGS))] for i in range(1 + int(_unit(sensor_id, "ntags") * 3))]
+    return {"vendor": vendor, "firmware": firmware, "install_date": day(install),
+            "calibration": {"offset": round((_unit(sensor_id, "off") - 0.5) * 0.4, 3), "scale": round(1 + (_unit(sensor_id, "scl") - 0.5) * 0.02, 4),
+                            "date": day(cal)},
+            "tags": sorted(set(tags))}

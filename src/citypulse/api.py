@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +20,23 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, chaos, core, gateway, geo, metrics, otlp, purge, reporter, sim, status
+from . import (
+    __version__,
+    chaos,
+    core,
+    explain,
+    gateway,
+    geo,
+    memory,
+    metrics,
+    otlp,
+    purge,
+    reporter,
+    sim,
+    status,
+    timeseries,
+    tools,
+)
 from .catalog import CITY_ID, DISTRICT_ID, DISTRICTS, GROUPS, TYPES
 from .config import get_settings
 from .core import COOKIE, CSRF_HEADER, auth, fed, local
@@ -520,11 +538,27 @@ def insights_route(order: str = "total", limit: int = 20):
 def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|offline|fault|stuck)$"),
                  type: str | None = Query(None, max_length=32), district: str | None = Query(None, max_length=24, pattern=DISTRICT_ID.pattern),
                  city: str | None = CityParam,
-                 q: str | None = Query(None, max_length=64), limit: int = Query(100, ge=1, le=500)):
+                 q: str | None = Query(None, max_length=64), limit: int = Query(100, ge=1, le=500),
+                 attrs: str | None = Query(None, max_length=512, description='JSON object the sensor metadata must contain, e.g. {"vendor":"Aerolab"} (jsonb @>, GIN)'),
+                 attrs_path: str | None = Query(None, max_length=256, description="SQL/JSON path the metadata must satisfy, e.g. $.calibration ? (@.offset > 0.1) (jsonb @?)")):
+    """Sensors, worst and newest first. `attrs` filters on device metadata with containment (`attrs @> :attrs`, served by the GIN index);
+    `attrs_path` with a jsonpath predicate (`attrs @? :path`, also served by it). Both may be combined with every other filter."""
     _api_role()
     if type is not None and type not in TYPES:
         raise HTTPException(422, "unknown sensor type")
     where, args = [], []
+    if attrs is not None:
+        try:
+            wanted = json.loads(attrs)
+        except ValueError as exc:
+            raise HTTPException(422, "attrs must be a JSON object, e.g. {\"vendor\":\"Aerolab\"}") from exc
+        if not isinstance(wanted, dict) or not wanted:
+            raise HTTPException(422, "attrs must be a non-empty JSON object")
+        where.append("attrs @> %s::jsonb")
+        args.append(json.dumps(wanted))
+    if attrs_path is not None:
+        where.append("attrs @? %s::jsonpath")
+        args.append(attrs_path)
     if state == "problem":
         where.append("status <> 'ok'")
     elif state != "all":
@@ -542,10 +576,15 @@ def list_sensors(state: str = Query("problem", pattern="^(problem|all|ok|stale|o
     if q:
         where.append("position(%s in id) > 0")
         args.append(q.lower())
-    sql = ("SELECT id, type, district, city, protocol, status, reason, last_ts, last_value, status_since FROM sensor"
+    sql = ("SELECT id, type, district, city, protocol, status, reason, last_ts, last_value, status_since, attrs FROM sensor"
            + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY status_since DESC LIMIT %s")
-    with connect() as conn:
-        return conn.execute(sql, [*args, limit]).fetchall()
+    try:
+        with connect() as conn:
+            return conn.execute(sql, [*args, limit]).fetchall()
+    except (psycopg.errors.SyntaxError, psycopg.errors.InvalidTextRepresentation, psycopg.errors.DataException) as exc:
+        if attrs_path is None:
+            raise
+        raise HTTPException(422, "attrs_path is not a valid SQL/JSON path: " + str(exc).splitlines()[0][:160]) from exc
 
 
 @app.get("/api/sensors/{sensor_id}", dependencies=[Depends(require("city:read"))])
@@ -561,6 +600,89 @@ def get_sensor(sensor_id: str):
         row["readings"] = conn.execute(
             "SELECT ts, value FROM reading WHERE sensor_id=%s ORDER BY ts DESC LIMIT 60", (sensor_id,)).fetchall()
     return row
+
+
+# --- districts: time series, pattern memory, one query across all models -----------------------------------------------------------
+# A district id is only unique within a city, so these routes need `city`. `/api/districts/geojson` (above) has one segment and never clashes.
+DistrictPath = PathParam(max_length=24, pattern=DISTRICT_ID.pattern)
+CityRequired = Query(..., max_length=32, pattern=CITY_PATTERN, description="The city the district belongs to")
+
+
+@app.get("/api/districts/{district_id}/series", dependencies=[Depends(require("city:read"))])
+def district_series(district_id: str = DistrictPath, city: str = CityRequired, bucket: str = Query("5m", pattern="^(5m|1h)$"),
+                    start: datetime | None = Query(None, alias="from", description="ISO 8601; default 6 h (5m) or 48 h (1h) before `to`"),
+                    to: datetime | None = Query(None, description="ISO 8601; default now"), type: str | None = Query(None, max_length=32)):
+    """Roll-up series of one district (`date_bin` buckets of `reading`, kept in `rollup_5m` / `rollup_1h`): readings, distinct sensors and
+    out-of-range readings per bucket, plus mean/min/max for one sensor `type`. At most 2100 buckets per request."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return timeseries.series(conn, city, district_id, bucket, start, to, type)
+    except timeseries.BadRange as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/districts/{district_id}/similar", dependencies=[Depends(require("city:read"))])
+def district_similar(district_id: str = DistrictPath, city: str = CityRequired, k: int = Query(5, ge=1, le=memory.SIMILAR_MAX),
+                     scope: str = Query("all", pattern="^(all|city)$")):
+    """The `k` most similar PAST episodes to this district's latest fingerprint (pgvector, cosine distance, HNSW), each with its outcome:
+    the verdict an hour later and how long the bad stretch lasted. `available: false` with a reason where pgvector is not installed."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            out = memory.similar(conn, city, district_id, k, scope)
+            conn.commit()
+            return out
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/districts/{district_id}/explain", dependencies=[Depends(require("city:read"))])
+def district_explain(district_id: str = DistrictPath, city: str = CityRequired, k: int = Query(3, ge=1, le=explain.K_MAX)):
+    """One SQL statement, one round trip, five data models: current status counts, the last hour of the roll-up, the vendor or firmware
+    over-represented among problem sensors, the nearest healthy sensors and neighbouring districts, and the most similar past episodes with
+    what happened next. A model whose extension is missing answers `available: false` and the rest still comes back."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            out = explain.explain(conn, city, district_id, k)
+            conn.commit()
+            return out
+    except explain.NoSuchDistrict as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+class ToolCall(BaseModel):
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/api/tools", dependencies=[Depends(require("city:read"))])
+def list_tools():
+    """Tool definitions (name, description, JSON Schema `input_schema`) an AIDB pipeline, MCP server or LLM agent can use. Read-only tools."""
+    return {"tools": tools.listing()}
+
+
+@app.post("/api/tools/{name}", dependencies=[Depends(require("city:read"))])
+def call_tool(name: str, body: ToolCall):
+    """Call one tool with `{"arguments": {...}}`; the arguments are checked against the tool's schema (422 when they do not fit)."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            out = tools.call(conn, name, body.arguments)
+            conn.commit()
+            return out
+    except tools.UnknownTool as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (tools.ToolError, timeseries.BadRange) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except explain.NoSuchDistrict as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
 
 
 # --- bursts ----------------------------------------------------------------------------------------

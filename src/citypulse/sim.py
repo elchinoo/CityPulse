@@ -17,7 +17,7 @@ import httpx
 
 from . import chaos, gateway, geo, metrics
 from . import settings_store as store
-from .catalog import TYPES, build_fleet, hash_str
+from .catalog import TYPES, build_fleet, hash_str, sensor_attrs
 from .config import get_settings, require_sim_city
 from .db import connect
 
@@ -73,7 +73,7 @@ class HttpSink:
 
 
 class Sensor:
-    __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member", "pos", "n")
+    __slots__ = ("id", "type", "district", "city", "bias", "due", "state", "frozen", "member", "pos", "n", "attrs")
 
     def __init__(self, sid: str, kind: str, district: str, rng: random.Random, city: str):
         t = TYPES[kind]
@@ -84,6 +84,7 @@ class Sensor:
         self.frozen: float | None = None
         self.member = hash_str(sid) % 100                     # stable position for "a share of sensors" effects
         self.pos = geo.sensor_position(city, district, sid)   # (lat, lon) inside its district, for a city with built-in geography
+        self.attrs = sensor_attrs(sid, kind, district)        # device metadata (vendor, firmware ...), sent with the position
         self.n = 0                                            # readings sent so far: the position goes along with every POSITION_EVERY-th
 
 
@@ -150,11 +151,14 @@ class Simulator:
             v = s.frozen
         else:
             s.frozen = None
-            v = self.value(s, now, 1 + 2 * noise, 0.04 * noise)
+            # The oldest firmware (1.4.2) is the one that misreads under electrical noise: a story the metadata lets "Explain this district" find.
+            v = self.value(s, now, 1 + 2 * noise, 0.04 * noise * (2.5 if s.attrs["firmware"] == "1.4.2" else 1.0))
         item = {"sensor": s.id, "type": s.type, "district": s.district, "city": s.city, "value": v,
                 "ts": round(now - 90 * late, 3)}
-        if s.pos and s.n % POSITION_EVERY == 0:
-            item["lat"], item["lon"] = s.pos
+        if s.n % POSITION_EVERY == 0:
+            item["attrs"] = s.attrs                           # a sensor repeats its metadata as often as its position: a lost batch cannot lose it for good
+            if s.pos:
+                item["lat"], item["lon"] = s.pos
         s.n += 1
         if corrupt and self.rng.random() < 0.08 * corrupt:
             item = self._corrupt(item)

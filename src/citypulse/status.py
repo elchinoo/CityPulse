@@ -30,6 +30,7 @@ DISTRICT_FLOOR, DISTRICT_MIN = 0.5, 20     # a district below this share ok (wit
 TYPE_FLOOR, TYPE_MIN = 0.85, 5             # a sensor type below this share ok (at least this many sensors) is named in the reasons
 TICK_SECONDS, HISTORY_EVERY, PRUNE_EVERY = 10, 30, 60
 _last = {"history": 0.0, "prune": 0.0}
+EXTRAS = True       # the roll-ups and the pattern memory ride on this engine's tick; a test that drives them by hand switches them off
 
 
 def tier(ratio: float) -> str:
@@ -235,9 +236,18 @@ def tick() -> bool:
         if now - _last["history"] >= HISTORY_EVERY:
             _last["history"] = now
             snapshot_history(conn, summary(conn))
+            conn.commit()
+            if EXTRAS:
+                from . import memory  # imported here: memory needs this module's tiers
+                memory.tick(conn)       # fingerprints on a verdict change and every quarter hour; never raises
         if now - _last["prune"] >= PRUNE_EVERY:
             _last["prune"] = now
+            if EXTRAS:
+                from . import timeseries
+                timeseries.tick(conn)   # refresh the 5-minute and hourly roll-ups from the newest readings, BEFORE old readings are pruned
             prune(conn)
+            if EXTRAS:
+                timeseries.prune(conn)
         conn.commit()
     return True
 

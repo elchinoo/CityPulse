@@ -9,7 +9,7 @@ It is a sample project: small enough to read in an afternoon, built to be extend
 
 **Documentation:** the complete [guide](docs/GUIDE.md) (ecosystem integration, architecture, install, configuration, operations,
 troubleshooting) and a [tutorial video script](docs/VIDEO-SCRIPT.md). EDB and AgentPG features: the [Map](docs/GUIDE.md#78-map-tab-postgis)
-(PostGIS), [database insights](docs/GUIDE.md#79-insights-tab-admin), [read-only and AI hardening](docs/GUIDE.md#710-what-a-read-only-user-and-agentpgs-restricted-mcp-can-see)
+(PostGIS), [multi-model data and Explain](docs/GUIDE.md#711-one-engine-five-data-models) (JSONB, partitions, pgvector), [database insights](docs/GUIDE.md#79-insights-tab-admin), [read-only and AI hardening](docs/GUIDE.md#710-what-a-read-only-user-and-agentpgs-restricted-mcp-can-see)
 and the [list of EDB and AgentPG capabilities this app uses](docs/GUIDE.md#edb-and-agentpg-capabilities-used-by-this-app).
 
 ```
@@ -29,6 +29,14 @@ and the [list of EDB and AgentPG capabilities this app uses](docs/GUIDE.md#edb-a
   parking bays. See `src/citypulse/catalog.py`.
 * **A map** (PostGIS): district polygons coloured by health and the sensors, drawn as inline SVG; `GET /api/sensors/nearby`
   and `GET /api/districts/geojson`. Readings may carry optional `lat` and `lon`. Without PostGIS the map says so and nothing else changes.
+* **Five data models in one Postgres** ([guide 7.11](docs/GUIDE.md#711-one-engine-five-data-models)): relational state, **JSON** device
+  metadata (`sensor.attrs`, GIN `jsonb_path_ops`, `GET /api/sensors?attrs={"vendor":"Aerolab"}` and a jsonpath filter),
+  **time series** on core Postgres (BRIN, `date_bin` roll-ups per district at 5 minutes and 1 hour, monthly partitions, `GET /api/districts/{id}/series`),
+  **geo** (PostGIS) and a **vector pattern memory** (pgvector, HNSW cosine): "have we seen this before?" finds the most similar past
+  episodes of a district and what happened next (`GET /api/districts/{id}/similar`, demo history with `citypulse seed-history`).
+  Each extension is guarded: without PostGIS or pgvector the routes say so and everything else works. No TimescaleDB or ClickHouse (not on AgentPG).
+* **Explain this district**: one SQL statement, one round trip, all five models (`GET /api/districts/{id}/explain`, the **Explain** tab),
+  also registered as a read-only tool with a JSON Schema (`GET /api/tools`) for an AIDB or MCP agent to call later. No LLM agent is built here.
 * **Database insights** (admin): top queries, tuning and index hints from EDB's extensions where installed, honestly "not
   available" elsewhere; the secrets tables are closed to AgentPG's read-only role and so to its restricted MCP server.
 * **Seven bursts**, individually or all at once, that end by themselves: `flood`, `noise`, `dropout`, `stuck`,
@@ -43,7 +51,8 @@ docker compose logs api         # the one-time setup code is printed here
 ```
 
 Open the app, enter the setup code, choose an admin password. About half a minute later the sensors have all
-reported and the Overview shows the heatmap. Open **Burst** and press the red button.
+reported and the Overview shows the heatmap. Open **Burst** and press the red button. For "have we seen this before?" to have a past on a
+fresh install, run `citypulse seed-history` once (optional: 28 deterministic days for paris and lyon; needs pgvector to search, see the guide, 7.14).
 
 Without Docker: `pip install -e ".[dev]"`, export `DATABASE_URL` and `CITYPULSE_CITY` (or `CITYPULSE_ROLE=api`), run `citypulse start`.
 
@@ -82,9 +91,9 @@ simulator prefixes them with the city).
   (the id of the legacy city while sensors still sit in it, else `null`). Sensor rows and `/api/sensors/<id>` carry `city`.
 * **Delete it (admin only):** `DELETE /api/cities/<id>` needs the permission `city:delete`, held by the `admin` role and by
   `full` API tokens only (operators, viewers and the narrower token scopes get `403`). It irreversibly deletes the city's
-  burst targets, readings, status history and sensors, each in transactions of at most 5000 rows (a large city never
+  burst targets, readings, status history, roll-ups, pattern-memory episodes and sensors, each in transactions of at most 5000 rows (a large city never
   locks the database; the sensors go last, so an interrupted deletion can simply be repeated), and answers
-  `{"city":"paris","deleted":{"chaos":n,"readings":n,"status_history":n,"sensors":n},"batches":n}`. `404` if no sensor
+  `{"city":"paris","deleted":{"chaos":n,"readings":n,"status_history":n,"rollups":n,"rollups_1h":n,"episodes":n,"sensors":n},"batches":n}`. `404` if no sensor
   reports for the city, `409` if another deletion is running. Stop the city's senders first: a sender that keeps
   reporting recreates its sensors. The dashboard has a **Delete city (Admin)** button on the Overview of a chosen city;
   it asks you to type the city id.

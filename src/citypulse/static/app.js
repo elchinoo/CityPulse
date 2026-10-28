@@ -2,6 +2,7 @@ import { api } from "/kit/api.js";
 import { initBurst } from "/static/burst.js";
 import { onCityChange, renderCityPicker } from "/static/cities.js";
 import { initConnect } from "/static/connect.js";
+import { initExplain } from "/static/explain.js";
 import { initMap, stopMap } from "/static/map.js";
 import { loadError } from "/static/fmt.js";
 import { initOverview, stopOverview } from "/static/overview.js";
@@ -11,11 +12,11 @@ import { bootSession, can, renderLogin, renderSetup, state } from "/kit/session.
 import { initSettings } from "/static/settings.js";
 import { $, errorState, h, loading } from "/kit/ui.js";
 
-const TABS = ["overview", "map", "sensors", "burst", "connect", "insights", "settings"];
-const INIT = { overview: initOverview, map: initMap, sensors: initSensors, burst: initBurst, connect: initConnect, settings: initSettings,
+const TABS = ["overview", "map", "explain", "sensors", "burst", "connect", "insights", "settings"];
+const INIT = { overview: initOverview, map: initMap, explain: initExplain, sensors: initSensors, burst: initBurst, connect: initConnect, settings: initSettings,
   insights: () => initInsights($("view-insights"), api) };
 // What each tab needs; the server enforces it, this only hides what would be refused.
-const NEEDS = { overview: "city:read", map: "city:read", sensors: "city:read", burst: "city:control", connect: "city:read", insights: "settings:manage", settings: "settings:manage" };
+const NEEDS = { overview: "city:read", map: "city:read", explain: "city:read", sensors: "city:read", burst: "city:control", connect: "city:read", insights: "settings:manage", settings: "settings:manage" };
 const SECTIONS = ["auth-card", "nav", "city-picker", "signout", ...TABS.map((t) => "view-" + t)];
 
 function hideAll() { for (const id of SECTIONS) $(id).hidden = true; }
@@ -62,7 +63,7 @@ function route() {
   for (const a of document.querySelectorAll("#nav a")) a.classList.toggle("active", a.dataset.tab === tab);
   const box = $("view-" + tab);
   if (!box.firstChild) loading(box);         // after sign-in the first data takes a moment: never a blank page
-  const start = () => Promise.resolve(INIT[tab](tab === "sensors" ? arg : undefined)).catch((err) => { if (state.session) errorState(box, loadError(err), start); });
+  const start = () => Promise.resolve(INIT[tab](tab === "sensors" || tab === "explain" ? arg : undefined)).catch((err) => { if (state.session) errorState(box, loadError(err), start); });
   start();
 }
 

@@ -4,7 +4,9 @@ Used by the HTTP routes and, in the `all` role, directly by the simulator. Bad i
 counted (data quality is a signal), never failing the whole batch. When the gateway is saturated it answers
 "overloaded" so senders back off and retry, which is what a real collection tier must do.
 """
+import json
 import math
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -142,6 +144,65 @@ def validate(item, now: datetime) -> tuple[str, str, str, datetime, float, str, 
     return sensor, kind, district, ts, value, protocol, city, lat, lon
 
 
+# ---- device metadata (sensor.attrs, JSONB) -----------------------------------------------------------------------------------
+ATTRS_MAX_BYTES = 1024            # serialized size of one attrs object
+ATTRS_MAX_KEYS, ATTRS_MAX_DEPTH, ATTRS_MAX_LIST, ATTRS_MAX_STR = 16, 2, 8, 120
+ATTR_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# Metadata describes a device (vendor, firmware, install date, calibration, tags); it is stored in clear text and readable by every
+# `city:read` caller and by AgentPG's read-only role, so credentials do not belong in it. This is a tripwire for the obvious cases
+# (key names and value shapes), not a secret scanner.
+SECRET_KEY = re.compile(r"(^|_)(pass|password|passwd|secret|token|api_?key|credentials?|private_?key|bearer|cookie|session|auth|authorization|signature|certificate)(_|$)",
+                        re.I)
+SECRET_VALUE = re.compile(r"^(bearer\s|basic\s|cp_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{10,}\.)"
+                          r"|-----BEGIN |^[A-Za-z0-9+/=_-]{40,}$", re.I)
+ATTRS_NOT_OBJECT = "attrs must be a JSON object"
+ATTRS_SECRET = "attrs must not hold secrets (credential-like key or value)"
+
+
+def _attr_problem(value, depth: int) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return None if math.isfinite(value) and abs(value) <= 1e15 else "attrs numbers must be finite"
+    if isinstance(value, str):
+        if len(value) > ATTRS_MAX_STR:
+            return f"attrs strings are limited to {ATTRS_MAX_STR} characters"
+        return ATTRS_SECRET if SECRET_VALUE.search(value) else None
+    if isinstance(value, list):
+        if depth >= ATTRS_MAX_DEPTH or len(value) > ATTRS_MAX_LIST:
+            return f"attrs lists hold at most {ATTRS_MAX_LIST} items"
+        if any(isinstance(v, (dict, list)) for v in value):
+            return "attrs lists hold scalars only"
+        return next((p for v in value if (p := _attr_problem(v, depth + 1))), None)
+    if isinstance(value, dict):
+        if depth >= ATTRS_MAX_DEPTH:
+            return f"attrs nest at most {ATTRS_MAX_DEPTH} levels"
+        if len(value) > ATTRS_MAX_KEYS:
+            return f"attrs hold at most {ATTRS_MAX_KEYS} keys per object"
+        for k, v in value.items():
+            if not isinstance(k, str) or not ATTR_KEY.match(k):
+                return "attrs keys must match ^[a-z][a-z0-9_]{0,39}$"
+            if SECRET_KEY.search(k):
+                return ATTRS_SECRET
+            if (p := _attr_problem(v, depth + 1)):
+                return p
+        return None
+    return "attrs hold JSON values only"
+
+
+def check_attrs(value) -> dict | str:
+    """The cleaned attrs object, or the reason it was rejected. At most 16 keys per object, two levels, 8-item lists of scalars, strings up
+    to 120 characters, 1024 bytes in all, keys `[a-z][a-z0-9_]*`, no credential-looking key or value. `None` is not an object (omit the field)."""
+    if not isinstance(value, dict):
+        return ATTRS_NOT_OBJECT
+    problem = _attr_problem(value, 0)
+    if problem:
+        return problem
+    if len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()) > ATTRS_MAX_BYTES:
+        return f"attrs are limited to {ATTRS_MAX_BYTES} bytes"
+    return value
+
+
 def accept(items: list) -> dict:
     """Validate and store a batch. Returns {"accepted", "rejected", "errors"}, plus "hint" (how to fix the sender) when
     readings were rejected for lacking a city."""
@@ -151,9 +212,15 @@ def accept(items: list) -> dict:
         raise BadBatch(f"at most {MAX_BATCH} readings per request")
     started = time.perf_counter()
     now = datetime.now(UTC)
-    good, errors, rejected = [], {}, 0
+    good, errors, rejected, attrs = [], {}, 0, {}
     for item in items:
         out = validate(item, now)
+        if not isinstance(out, str) and item.get("attrs") is not None:   # optional device metadata: validated like the rest of the item
+            checked = check_attrs(item["attrs"])
+            if isinstance(checked, str):
+                out = checked
+            else:
+                attrs[out[0]] = checked              # the last attrs a sensor sent in this batch win
         if isinstance(out, str):
             rejected += 1
             errors[out] = errors.get(out, 0) + 1
@@ -168,7 +235,7 @@ def accept(items: list) -> dict:
         slow = [b.intensity for b in _bursts.get() if b.kind == "slow_db"]
         if slow:  # a struggling database: hold the slot while it "thinks"
             time.sleep(0.5 * max(slow))
-        refused = _store(good, errors) if good else 0
+        refused = _store(good, errors, attrs) if good else 0
     except Overloaded:
         metrics.BATCHES.labels("overloaded").inc()
         raise
@@ -195,9 +262,11 @@ def accept(items: list) -> dict:
     return out
 
 
-def _store(good: list, errors: dict) -> int:
-    """Write the batch. Returns how many extra items were refused (city mismatch, sensor cap)."""
+def _store(good: list, errors: dict, attrs: dict | None = None) -> int:
+    """Write the batch. Returns how many extra items were refused (city mismatch, sensor cap). `attrs` maps sensor id to its
+    validated metadata object (only for the sensors that sent some)."""
     refused = 0
+    attrs = attrs or {}
     try:
         with pool().connection(timeout=3) as conn:
             existing = {r["id"]: r["city"] for r in
@@ -233,18 +302,25 @@ def _store(good: list, errors: dict) -> int:
                     ([g[0] for g in good], [g[3] for g in good], [g[4] for g in good]))
                 rows = list(latest.values())
                 cities = sorted({r[6] for r in rows})
-                head, tail = "INSERT INTO sensor (id, type, district, last_ts, last_value, protocol, city) ", (
-                    "ON CONFLICT (id) DO UPDATE SET "
-                    " last_value = CASE WHEN EXCLUDED.last_ts >= sensor.last_ts THEN EXCLUDED.last_value ELSE sensor.last_value END, "
-                    " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()")
                 cols = [[r[k] for r in rows] for k in range(6)]
-                # Positions travel only in batches that have some (the simulator sends one every few dozen readings), so the usual
-                # upsert never touches lat/lon and the sensor updates stay HOT.
-                pos = [[xy[r[0]][k] if r[0] in xy else None for r in rows] for k in range(2)] if xy else []
-                if pos:
-                    head = head.replace("protocol, city) ", "protocol, city, lat, lon) ")
-                    tail += ", lat = coalesce(EXCLUDED.lat, sensor.lat), lon = coalesce(EXCLUDED.lon, sensor.lon)"
-                sel, arr, alias = (", u.lat, u.lon", ", %s::float8[], %s::float8[]", ", lat, lon") if pos else ("", "", "")
+                # Optional columns travel only in batches that have some (the simulator sends a position every few dozen readings; attrs are sent on
+                # first contact and on change), so the usual upsert never touches them and the sensor updates stay HOT.
+                extra = []          # (column, array type, values per row, expression on the unnest alias u)
+                if xy:
+                    extra += [("lat", "float8", [xy[r[0]][0] if r[0] in xy else None for r in rows], "u.lat"),
+                              ("lon", "float8", [xy[r[0]][1] if r[0] in xy else None for r in rows], "u.lon")]
+                if attrs:
+                    extra.append(("attrs", "text", [json.dumps(attrs[r[0]], separators=(",", ":")) if r[0] in attrs else None for r in rows],
+                                  "u.attrs::jsonb"))
+                head = "INSERT INTO sensor (id, type, district, last_ts, last_value, protocol, city" + "".join(f", {c}" for c, *_ in extra) + ") "
+                tail = ("ON CONFLICT (id) DO UPDATE SET "
+                        " last_value = CASE WHEN EXCLUDED.last_ts >= sensor.last_ts THEN EXCLUDED.last_value ELSE sensor.last_value END, "
+                        " last_ts = greatest(EXCLUDED.last_ts, sensor.last_ts), last_received = now()"
+                        + "".join(f", {c} = coalesce(EXCLUDED.{c}, sensor.{c})" for c, *_ in extra))
+                sel = "".join(f", {e}" for *_, e in extra)
+                arr = "".join(f", %s::{t}[]" for _, t, *_ in extra)
+                alias = "".join(f", {c}" for c, *_ in extra)
+                pos = [v for _, _, v, _ in extra]
                 if len(cities) == 1:   # the usual batch: one city, passed as a scalar
                     conn.execute(head + "SELECT u.id, u.type, u.district, u.ts, u.val, u.proto, %s::text" + sel
                                  + " FROM unnest(%s::text[], %s::text[], %s::text[], %s::timestamptz[], %s::float8[], %s::text[]" + arr
