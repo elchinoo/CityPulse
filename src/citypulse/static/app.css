@@ -131,6 +131,8 @@ button.burst:hover { filter: brightness(1.08); }
 .map-svg .district .area { stroke: var(--surface); stroke-width: 1.5; fill: var(--cell-off); fill-opacity: .85; }
 .map-svg .district.h0 .area { fill: var(--bad); } .map-svg .district.h1 .area { fill: #ea580c; } .map-svg .district.h2 .area { fill: var(--amber); }
 .map-svg .district.h3 .area { fill: #84cc16; } .map-svg .district.h4 .area { fill: var(--good); }
+.map-svg .district.derived .area { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.heat-key.derived { background: transparent; border: 1.5px dashed var(--text); box-sizing: border-box; }
 .map-svg .district:hover .area { fill-opacity: 1; }
 .map-svg .district:focus-visible .area { stroke: var(--text); stroke-width: 3; fill-opacity: 1; }
 .map-svg .area-name { fill: var(--text); font-size: 11px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; pointer-events: none; }

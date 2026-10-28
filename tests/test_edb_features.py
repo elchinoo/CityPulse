@@ -328,6 +328,37 @@ def test_districts_geojson_assigns_sensors_by_containment_and_reports_health(cli
     assert wrong == 0
 
 
+def test_derived_areas_for_external_cities_cover_their_sensors(client, postgis):
+    pts = {"d1": [(10.00, 20.00), (10.00, 20.01), (10.01, 20.00), (10.01, 20.01)],        # a square: a polygon hull
+           "d2": [(10.10, 20.00), (10.11, 20.00), (10.12, 20.00)],                         # collinear: a buffered line
+           "d3": [(10.20, 20.00)]}                                                         # one point: a buffered point
+    items = [reading(f"gotham.s-{d}-{i}", city="gotham", district=d, lat=lat, lon=lon) for d, ps in pts.items() for i, (lat, lon) in enumerate(ps)]
+    items.append(reading("paris.s-d01-9", district="d01", lat=48.84, lon=2.32))              # built-in district: never derived
+    items.append(reading("gotham.s-nopos", city="gotham", district="d1"))
+    assert gateway.accept(items)["accepted"] == len(items)
+    with connect() as c:
+        first = geo.refresh_derived_areas(c)
+        again = geo.refresh_derived_areas(c)
+        rows = c.execute("SELECT district, source, ST_GeometryType(geom) AS t, ST_IsValid(geom) AS ok FROM district_area WHERE city = 'gotham' ORDER BY district").fetchall()
+        builtin_paris = c.execute("SELECT count(*) AS n FROM district_area WHERE city = 'paris' AND source = 'builtin'").fetchone()["n"]
+        paris_derived = c.execute("SELECT count(*) AS n FROM district_area WHERE city = 'paris' AND source = 'derived'").fetchone()["n"]
+    assert first["available"] and first["written"] == 3 and again["written"] == 0, "idempotent: unchanged geometry is not rewritten"
+    assert [(r["district"], r["source"], r["t"], r["ok"]) for r in rows] == [(d, "derived", "ST_Polygon", True) for d in ("d1", "d2", "d3")]
+    assert builtin_paris == len(catalog.DISTRICTS) and paris_derived == 0
+    login(client)
+    gj = client.get("/api/districts/geojson?city=gotham").json()
+    props = {f["properties"]["district"]: f["properties"] for f in gj["features"]}
+    assert sorted(props) == ["d1", "d2", "d3"] and all(p["source"] == "derived" for p in props.values())
+    assert (props["d1"]["total"], props["d2"]["total"], props["d3"]["total"]) == (4, 3, 1), "derived areas count the sensors that report them"
+    assert gj["sensors_without_location"] == 1
+    with connect() as c:                                                                  # the sensors leave: the derived rows go, built-in stay
+        c.execute("DELETE FROM sensor WHERE city = 'gotham'")
+        c.commit()
+        assert geo.refresh_derived_areas(c)["removed"] == 3
+        assert c.execute("SELECT count(*) AS n FROM district_area WHERE source = 'derived'").fetchone()["n"] == 0
+        assert c.execute("SELECT count(*) AS n FROM district_area WHERE source = 'builtin'").fetchone()["n"] == len(geo.CITIES) * len(catalog.DISTRICTS)
+
+
 def test_sensors_geojson_lists_located_sensors_as_points(client, postgis):
     gateway.accept([reading("paris.a-d01-0001", lat=48.84, lon=2.32), reading("paris.b-d01-0002", lat=48.85, lon=2.33), reading("paris.c-d01-0003")])
     with connect() as c:

@@ -73,6 +73,7 @@ async def lifespan(_: FastAPI):
     if cfg.role in ("api", "all"):
         _startup_tasks()
         tasks.append(asyncio.create_task(status.run_forever()))
+        tasks.append(asyncio.create_task(geo.run_forever()))
         rep = reporter.maybe_start()
         if rep:
             tasks.append(asyncio.create_task(rep.run()))

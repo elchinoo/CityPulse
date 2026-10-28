@@ -51,8 +51,12 @@ const outerRings = (geometry) => (geometry.type === "Polygon" ? [geometry.coordi
 export const districtLink = (district) => `#sensors/${encodeURIComponent(district)}/-`;
 const open = (district) => { location.hash = districtLink(district); };
 
+export const DERIVED_NOTE = "outline derived from sensor positions";
+const isDerived = (p) => p.source === "derived";
+
 function districtLabel(p) {
-  return p.total ? `${p.name}: ${pct(p.health)} healthy, ${p.total.toLocaleString()} located sensors. Press Enter to list its sensors.` : `${p.name}: no located sensors. Press Enter to list its sensors.`;
+  const tail = isDerived(p) ? ` (${DERIVED_NOTE})` : "";
+  return (p.total ? `${p.name}: ${pct(p.health)} healthy, ${p.total.toLocaleString()} located sensors. Press Enter to list its sensors.` : `${p.name}: no located sensors. Press Enter to list its sensors.`) + tail;
 }
 
 export function drawMap(districts, sensors) {
@@ -64,7 +68,7 @@ export function drawMap(districts, sensors) {
   const layer = svgEl("g", { class: "districts" });
   for (const { f, rings } of polys) {
     const p = f.properties, label = districtLabel(p);
-    const g = svgEl("g", { class: `district ${healthClass(p.health)}`, tabindex: "0", role: "link", "aria-label": label, "data-district": p.district,
+    const g = svgEl("g", { class: `district ${healthClass(p.health)}${isDerived(p) ? " derived" : ""}`, tabindex: "0", role: "link", "aria-label": label, "data-district": p.district,
       onclick: () => open(p.district), onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(p.district); } } },
     svgEl("title", {}, label), ...rings.map((r) => svgEl("path", { class: "area", d: ringPath(r, project) })));
     const [cx, cy] = project.point(...centroid(rings[0]));
@@ -94,7 +98,7 @@ function districtTable(districts) {
     h("thead", {}, h("tr", {}, ...["District", "Located sensors", "Healthy", "Worst", "Reported elsewhere", ""].map((t) => h("th", {}, t)))),
     h("tbody", {}, ...rows.map((f) => {
       const p = f.properties;
-      return h("tr", {}, h("td", { class: "title" }, p.name), h("td", { class: "num" }, p.total.toLocaleString()), h("td", { class: "num" }, p.total ? pct(p.health) : ""),
+      return h("tr", {}, h("td", { class: "title" }, p.name, isDerived(p) ? h("small", { class: "muted derived-note" }, ` · ${DERIVED_NOTE}`) : null), h("td", { class: "num" }, p.total.toLocaleString()), h("td", { class: "num" }, p.total ? pct(p.health) : ""),
         h("td", {}, p.worst_status && p.worst_status !== "ok" ? h("span", { class: `st ${p.worst_status}` }, p.worst_status) : ""),
         h("td", { class: "num" }, p.reported_elsewhere || ""),
         h("td", {}, h("button", { type: "button", class: "secondary small", "aria-label": `List the sensors of ${p.name}`, onclick: () => open(p.district) }, "Sensors")));
@@ -115,7 +119,8 @@ function problemTable(sensors) {
 function legend() {
   return h("div", { class: "legend" }, "District health:", ...["h0", "h1", "h2", "h3", "h4"].map((c, i) =>
     h("span", {}, h("i", { class: `heat-key ${c}` }), ["<50%", "50–75%", "75–90%", "90–98%", "≥98%"][i])),
-  h("span", {}, h("i", { class: "heat-key none" }), "no located sensor"));
+  h("span", {}, h("i", { class: "heat-key none" }), "no located sensor"),
+  h("span", {}, h("i", { class: "heat-key derived" }), `dashed: ${DERIVED_NOTE}`));
 }
 
 async function render(view) {
@@ -140,7 +145,7 @@ async function render(view) {
       return;
     }
     if (!districts.features.length && !sensors.features.length) {
-      fill(view.body, h("div", { class: "card" }, h("p", { class: "empty" }, scoped ? `City ${scoped} has no built-in district polygons and no sensor has reported a position yet. Send lat and lon with the readings (see Connect).` : "No city has a position yet.")));
+      fill(view.body, h("div", { class: "card" }, h("p", { class: "empty" }, scoped ? `City ${scoped} has no built-in district polygons and no sensor has reported a position yet (districts of other cities are outlined from the sensors' positions). Send lat and lon with the readings (see Connect).` : "No city has a position yet.")));
       return;
     }
     const note = districts.sensors_without_location ? `${districts.sensors_without_location.toLocaleString()} sensors have no position and are not drawn. ` : "";

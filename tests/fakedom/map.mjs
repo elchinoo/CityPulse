@@ -18,7 +18,8 @@ const feature = (district, name, health, total, geometry, extra = {}) => ({ type
     counts: {}, reported_elsewhere: 0, ...extra } });
 const DISTRICTS = { available: true, type: "FeatureCollection", city: "paris", sensors_without_location: 4, features: [
   feature("d01", "Harbor", 0.4, 10, sq(2.30, 48.84)), feature("d02", "Old Town", 1, 10, sq(2.32, 48.84)),
-  feature("d03", "Financial Quarter", null, 0, sq(2.34, 48.84)), feature("d04", "University Hill", 0.8, 5, sq(2.30, 48.85), { reported_elsewhere: 2 })] };
+  feature("d03", "Financial Quarter", null, 0, sq(2.34, 48.84)), feature("d04", "University Hill", 0.8, 5, sq(2.30, 48.85), { reported_elsewhere: 2 }),
+  feature("x9", "X9", 1, 3, sq(2.36, 48.85), { source: "derived" })] };
 const point = (id, status, lon, lat) => ({ type: "Feature", id, geometry: { type: "Point", coordinates: [lon, lat] }, properties: { id, type: "temperature", district: "d01", city: "paris", status, reason: null } });
 const SENSORS = { available: true, type: "FeatureCollection", city: "paris", state: "problem", matching: 30, features: [point("paris.a", "offline", 2.305, 48.845), point("paris.b", "fault", 2.325, 48.842)] };
 
@@ -63,8 +64,12 @@ const svg = all.find((e) => e.tag === "svg");
 assert.ok(svg && svg.attrs.viewBox && svg.attrs.role === "group" && svg.attrs["aria-label"], "an inline SVG with a role and a name");
 for (const e of all) assert.ok(!("style" in e.attrs), `no inline style attribute on <${e.tag}>`);
 const groups = svg.all().filter((e) => e.tag === "g" && /(^| )district /.test(cls(e) + " "));
-assert.equal(groups.length, 4, "one group per district");
-assert.deepEqual(groups.map((g) => cls(g).split(" ")[1]), ["h0", "h4", "none", "h2"], "colour classes follow the health");
+assert.equal(groups.length, 5, "one group per district");
+assert.deepEqual(groups.map((g) => cls(g).split(" ")[1]), ["h0", "h4", "none", "h2", "h4"], "colour classes follow the health");
+assert.deepEqual(groups.map((g) => /(^| )derived( |$)/.test(cls(g))), [false, false, false, false, true], "only the derived area is marked");
+assert.ok(groups[4].attrs["aria-label"].includes("outline derived from sensor positions") && !groups[0].attrs["aria-label"].includes("derived"));
+assert.ok(box.textContent.includes("outline derived from sensor positions"), "table and legend say so");
+assert.ok(svg.all().some((e) => e.tag === "path") && svg.all().some((e) => e.tag === "circle"), "a chosen city draws polygons and points");
 for (const g of groups) {
   assert.equal(g.attrs.tabindex, "0");
   assert.equal(g.attrs.role, "link");
@@ -94,13 +99,13 @@ assert.ok(text.includes("Showing 2 of 30 matching sensors") && text.includes("4 
 const captions = all.filter((e) => e.tag === "caption").map((c) => c.textContent);
 assert.ok(captions.some((c) => c.includes("Districts on the map")), "table captions for screen readers");
 const rowButtons = all.filter((e) => e.tag === "button" && (e.attrs["aria-label"] || "").startsWith("List the sensors of"));
-assert.equal(rowButtons.length, 4);
+assert.equal(rowButtons.length, 5);
 await rowButtons.find((b) => b.attrs["aria-label"].includes("Harbor")).click();
 assert.equal(location.hash, "#sensors/d01/-");
 location.hash = "#map";
 // the list is sorted worst first: Harbor (40%) before University Hill (80%) before Old Town (100%), no-sensor districts last
 const firstCells = all.filter((e) => e.tag === "td" && cls(e) === "title").map((e) => e.textContent);
-assert.deepEqual(firstCells, ["Harbor", "University Hill", "Old Town", "Financial Quarter"]);
+assert.deepEqual(firstCells, ["Harbor", "University Hill", "Old Town", "X9 · outline derived from sensor positions", "Financial Quarter"]);
 
 // the select asks for every located sensor
 const sel = box.all().find((e) => e.tag === "select");

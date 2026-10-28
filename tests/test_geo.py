@@ -5,6 +5,7 @@ import math
 import time
 from datetime import UTC, datetime
 
+import psycopg
 import pytest
 
 from citypulse import catalog, gateway, geo, sim
@@ -211,3 +212,55 @@ def test_the_kit_is_new_enough_for_insights_and_masking():
     from apgkit import insights, masking, migrate
     assert hasattr(insights, "insights_payload") and hasattr(masking, "mask_view")
     assert "after_migrate" in migrate.run.__code__.co_varnames or "after_migrate" in migrate.run.__kwdefaults__
+
+
+# ---- derived areas -----------------------------------------------------------------------------------------------------------
+def test_derived_area_sql_is_minimal_and_never_touches_builtin_rows():
+    sql = geo.REFRESH_DERIVED
+    for fn in ("ST_ConvexHull", "ST_Collect", "ST_Buffer", "ST_OrderingEquals"):
+        assert fn in sql
+    assert "source = 'builtin'" in sql and "NOT EXISTS" in sql, "a district with a built-in polygon is never derived"
+    assert "district_area.source = 'derived'" in sql, "only derived rows are updated"
+    assert "builtin" not in geo.PRUNE_DERIVED and "source = 'derived'" in geo.PRUNE_DERIVED
+    assert "a.source <> 'derived' AND ST_Contains" in geo.AREAS_SQL and "a.source = 'derived' AND a.district = s.district" in geo.AREAS_SQL
+
+
+def test_refresh_derived_areas_runs_both_statements_and_commits(postgis_cache):
+    class Cur:
+        def __init__(self, n):
+            self.rowcount = n
+
+    class Conn(FakeConn):
+        committed = 0
+
+        def execute(self, sql, params=None):
+            self.seen.append((sql, params))
+            return Cur(3 if sql.startswith("INSERT") else 1)
+
+        def commit(self):
+            self.committed += 1
+    conn = Conn({})
+    assert geo.refresh_derived_areas(conn) == {"available": True, "written": 3, "removed": 1}
+    assert conn.seen[0][1] == {"hull": geo.HULL_BUFFER_M, "point": geo.POINT_BUFFER_M} and conn.committed == 1
+
+
+def test_refresh_derived_areas_is_quiet_without_postgis_and_survives_errors(postgis_cache):
+    geo._cache.update(at=1e12, ok=False, reason=geo.NO_POSTGIS)
+    assert geo.refresh_derived_areas(FakeConn({})) == {"available": False, "written": 0, "removed": 0}
+    geo._cache.update(at=1e12, ok=True, reason="")
+
+    class Boom(FakeConn):
+        rolled = False
+
+        def execute(self, sql, params=None):
+            raise psycopg.errors.InternalError_("boom\ndetail")
+
+        def rollback(self):
+            self.rolled = True
+    c = Boom({})
+    assert geo.refresh_derived_areas(c)["written"] == 0 and c.rolled
+
+
+def test_derived_features_expose_their_source(postgis_cache):
+    conn = FakeConn({"FROM district_area a": [area_row("d01", 2, 2, source="derived")], "geom IS NULL": [{"n": 0}]})
+    assert geo.districts_geojson(conn)["features"][0]["properties"]["source"] == "derived"

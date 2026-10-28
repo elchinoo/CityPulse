@@ -11,6 +11,14 @@ Built-in geography (deterministic: nothing is random per run). Each city in CITI
 corners are shared by neighbouring cells and shifted by a fixed pseudo-random amount (a hash of city and corner), so the polygons
 tile without gaps but are not rectangles. A sensor is placed from a hash of its id inside the middle half of its district's cell,
 which can never reach the shifted edge, so it always lies inside its polygon.
+
+Derived geography. A fleet that is not the built-in simulator (a real one, or an external simulator in a city such as "gotham")
+has no polygons, but its sensors report positions. `refresh_derived_areas` computes one area per (city, district) that has located
+sensors and no built-in polygon: the convex hull of the sensors (ST_ConvexHull over ST_Collect), grown by a few metres of
+geography buffer (ST_Buffer) so it is never razor-thin, or just a buffered point or line when the sensors are fewer than three or
+collinear. It stores them with source 'derived'; built-in rows are never touched. Derived hulls of neighbouring districts can
+overlap, so a sensor is counted in a derived district by the id it REPORTS (a sensor lies in two hulls at most by geometry, in one
+by id); built-in districts keep the containment rule (ST_Contains), which cannot overlap because the cells tile.
 """
 from __future__ import annotations
 
@@ -37,6 +45,10 @@ CELL_LAT = 0.0125                  # degrees of latitude per cell, about 1.39 km
 SHIFT = 0.18                       # corner shift, as a share of a cell
 INNER = 0.5                        # sensors use the middle INNER x INNER of a cell
 BUILTIN = "builtin"
+DERIVED = "derived"
+HULL_BUFFER_M = 40                 # grown around a hull of three or more points (metres, geography)
+POINT_BUFFER_M = 75                # around a single point or a straight line of points
+REFRESH_EVERY = 300.0              # seconds between derived-area refreshes (api role)
 
 
 def _unit(*parts: object) -> float:
@@ -165,6 +177,58 @@ UPSERT_AREA = (
     "WHERE district_area.source = %s AND NOT ST_OrderingEquals(district_area.geom, EXCLUDED.geom)")
 
 
+# One statement. `grouped` has one row per (city, district) with located sensors whose ids fit the table's CHECK constraints; the hull
+# is a Polygon only for >= 3 non-collinear points, otherwise a Point or LineString that gets the larger buffer. ST_Buffer on geography
+# works in metres; ST_GeometryN(.., 1) is the polygon itself (a buffer is one polygon) and keeps the column type Polygon.
+REFRESH_DERIVED = (
+    "INSERT INTO district_area (city, district, geom, source) "
+    "SELECT g.city, g.district, ST_GeometryN(ST_Buffer(g.hull::geography, "
+    "CASE WHEN ST_GeometryType(g.hull) = 'ST_Polygon' THEN %(hull)s ELSE %(point)s END)::geometry, 1), 'derived' "
+    "FROM (SELECT s.city, s.district, ST_ConvexHull(ST_Collect(s.geom::geometry)) AS hull FROM sensor s "
+    "      WHERE s.geom IS NOT NULL AND s.city ~ '^[a-z0-9][a-z0-9_-]{0,31}$' AND s.district ~ '^[a-z0-9][a-z0-9_-]{0,23}$' "
+    "      GROUP BY s.city, s.district) g "
+    "WHERE NOT EXISTS (SELECT 1 FROM district_area b WHERE b.city = g.city AND b.district = g.district AND b.source = 'builtin') "
+    "ON CONFLICT (city, district) DO UPDATE SET geom = EXCLUDED.geom "
+    "WHERE district_area.source = 'derived' AND NOT ST_OrderingEquals(district_area.geom, EXCLUDED.geom)")
+# Derived rows whose district has no located sensor any more (deleted city or sensors). Built-in rows are never removed.
+PRUNE_DERIVED = (
+    "DELETE FROM district_area a WHERE a.source = 'derived' "
+    "AND NOT EXISTS (SELECT 1 FROM sensor s WHERE s.city = a.city AND s.district = a.district AND s.geom IS NOT NULL)")
+
+
+def refresh_derived_areas(conn) -> dict:
+    """Recompute the areas derived from sensor positions (see the module docstring). Cheap (one grouped scan of located sensors, writes
+    only changed rows), idempotent, and quiet without PostGIS. Returns {"available", "written", "removed"}."""
+    ok, _reason = status(conn)
+    if not ok:
+        return {"available": False, "written": 0, "removed": 0}
+    try:
+        written = conn.execute(REFRESH_DERIVED, {"hull": HULL_BUFFER_M, "point": POINT_BUFFER_M}).rowcount
+        removed = conn.execute(PRUNE_DERIVED).rowcount
+        conn.commit()
+    except psycopg.Error as exc:
+        conn.rollback()
+        log.warning("derived areas not refreshed: %s", str(exc).splitlines()[0][:160])
+        return {"available": True, "written": 0, "removed": 0}
+    return {"available": True, "written": written, "removed": removed}
+
+
+async def run_forever(every: float = REFRESH_EVERY) -> None:
+    """Background loop for the api role: refresh the derived areas every few minutes in a worker thread, never blocking requests."""
+    import asyncio
+
+    from .db import connect
+    while True:
+        try:
+            def once() -> None:
+                with connect(retries=1) as conn:
+                    refresh_derived_areas(conn)
+            await asyncio.to_thread(once)
+        except Exception as exc:  # noqa: BLE001 - database asleep or restarting: try again next round
+            log.info("derived areas: %s", str(exc).splitlines()[0][:160])
+        await asyncio.sleep(every)
+
+
 def wkt(ring: list[tuple[float, float]]) -> str:
     return "POLYGON((" + ", ".join(f"{lon:.6f} {lat:.6f}" for lon, lat in ring) + "))"
 
@@ -198,6 +262,12 @@ def ensure(conn) -> dict:
             log.warning(reason)
             return {"available": False, "reason": reason, "areas": 0}
         ok, reason = _probe(conn)
+        if ok:
+            try:
+                conn.execute(REFRESH_DERIVED, {"hull": HULL_BUFFER_M, "point": POINT_BUFFER_M})   # once at start, after the built-in rows exist
+                conn.execute(PRUNE_DERIVED)
+            except psycopg.Error as exc:
+                log.warning("derived areas not computed at start: %s", str(exc).splitlines()[0][:160])
         areas = conn.execute("SELECT count(*) AS n FROM district_area").fetchone()["n"] if ok else 0
         return {"available": ok, "reason": reason, "areas": areas}
     finally:
@@ -229,7 +299,7 @@ SEVERITY = ["offline", "fault", "stuck", "stale"]
 AREAS_SQL = (
     "WITH located AS ("
     " SELECT s.id, s.city, s.status, s.district AS reported, a.district AS inside "
-    " FROM sensor s LEFT JOIN district_area a ON a.city = s.city AND ST_Contains(a.geom, s.geom::geometry) "
+    " FROM sensor s LEFT JOIN district_area a ON a.city = s.city AND ((a.source <> 'derived' AND ST_Contains(a.geom, s.geom::geometry)) OR (a.source = 'derived' AND a.district = s.district)) "
     " WHERE s.geom IS NOT NULL AND (%(city)s::text IS NULL OR s.city = %(city)s)) "
     "SELECT a.city, a.district, ST_AsGeoJSON(a.geom, 6) AS geometry, a.source, count(l.id) AS total, "
     + ", ".join(f"count(l.id) FILTER (WHERE l.status = '{k}') AS {k}" for k in ("ok", *SEVERITY))
