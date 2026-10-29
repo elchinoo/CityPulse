@@ -1,57 +1,74 @@
-# Tutorial video: build and review cut
+# Tutorial video: recorder and build
 
-`docs/VIDEO-SCRIPT.md` is the script, `record.spec.ts` the recorder (real Chrome, 1920x1080, Playwright video), `build.py` turns both into the
-finished file with narration and captions.
+One command goes from `docs/VIDEO-SCRIPT.md` and the recorder to the finished review cut:
 
 ```bash
-cd docs/video
-npm install                                   # the project's own devDependencies (@playwright/test); needs Google Chrome
-python3 build.py --deliver ../../../videos/review   # script + recorder -> out/citypulse.mp4 and .srt, copied to the review folder
+cd CityPulse/docs/video
+npm install                                   # @playwright/test only; uses the machine's Google Chrome
+python3 build.py --deliver ../../../videos/review   # narration + recording + mux -> out/build/citypulse.mp4 and .srt, copied to the review folder
 ```
 
-Needs: the local Kokoro text-to-speech tool `../../../videos/tts` (`narrate.py` and its `.venv`; override with `TTS_DIR`), `ffmpeg`/`ffprobe`
-on PATH (Homebrew is fine), Node, PostgreSQL 17 binaries on PATH (or `RECORD_PG_BIN`) and `../../.venv` with CityPulse installed. Nothing is
-downloaded; no live service or real credential is used. A take lasts about 5 minutes of warm-up (the fleet must have history) plus the video
-itself, so allow about 15 minutes.
+Output: `out/build/citypulse.mp4` (1920x1080, H.264 yuv420p, AAC, faststart, captions as a soft `mov_text` track) and `out/build/citypulse.srt`.
+Everything stays local: a throwaway Postgres on 127.0.0.1, a real PagerLens and CityPulse on free ports (from `CITYPULSE_PORT_RANGE`, default
+`41500-41599`). A fresh database on every take. `out/` is git-ignored; do not commit media. Allow about 15 minutes (5.5 minutes of warm-up before
+the camera starts, so the charts and the roll-up have history, plus the video itself).
 
-What `build.py` does:
+Needs: macOS, `ffmpeg`/`ffprobe`, Node 22+, Google Chrome, Postgres 17 binaries with pgvector and `pg_trgm` on `PATH` (or `RECORD_PG_BIN`), the
+`CityPulse/.venv` (CityPulse installed) and `pagerlens/.venv` next to it (the alert hand-off of scene 5 runs the real PagerLens), and the local
+Kokoro tool folder `videos/tts` (its own `.venv` and models; nothing is downloaded; shared and never edited from here).
 
-1. **Narration.** `narration.txt` is the spoken text, written for listening (short sentences, one `## <scene id> <voice>` section per scene of
-   VIDEO-SCRIPT.md). Blank line = pause, a line `...` = short beat, `[pause 18]` = deliberate long pause over something happening on screen
-   (the burst building up, the recovery). `videos/tts/narrate.py scenes` speaks it with Kokoro (local neural voices; nothing leaves the machine) and
-   writes `out/audio/scene-<id>.wav` plus `narration.json` (scene durations and per-sentence cues). The voice changes with the topic, British
-   accent throughout, alternating female and male:
+Structure (problem first, about 5 minutes; story: *my data is time series, JSON, geo and vectors*; landing moment: "look how much easier this is"):
 
-   | Topic | Scenes | Voice |
-   |---|---|---|
-   | Introduction and start | 1, 2 | `bf_isabella` (female) |
-   | Reading the dashboard | 3, 4 | `bm_george` (male) |
-   | Feeding it data | 5, 6 | `bf_emma` (female) |
-   | Breaking it and recovering | 7, 8, 9 | `bm_lewis` (male) |
-   | Watching it, recap | 10, 11 | `bf_isabella` (female) |
+| Scene | Topic | Voice | Local or captured |
+|---|---|---|---|
+| 1 | The problem (a city, sensors from many vendors, "the usual answer is four databases") and who is who: PLATFORM = EDB Postgres on AgentPG, REFERENCE SCAFFOLDING = identity, gateway, vault (swap any of it, said at second 18), SAMPLE APP = CityPulse and its simulator | `am_liam` | diagram |
+| 2 | The map: sensors with lat/lon, outlines derived from the positions, health colours, "what is near this point, in metres" (`ST_DWithin`) | `af_heart` | sensor detail and "Map not available" local; the map captured; the query is labelled source text |
+| 3 | One SQL statement across five models (the Explain tab) | `am_eric` | relational, time series, JSON and the SQL local; all five models captured |
+| 4 | Live data: the simulator, a new vendor's JSON + position batch, the JSONB query, the burst, the verdict falling | `af_heart` | local |
+| 5 | The alert hand-off: PagerLens opens an incident | `am_liam` | local (a real PagerLens) |
+| 6 | Insights: edb_stat_monitor, edb_pg_tuner, query_advisor | `af_heart` | "Not available" local; everything else captured |
+| 7 | A read-only user: reads the fleet, is denied the secret tables | `am_eric` | local (real `psql`) |
+| 8 | Recap: look how much easier this is; try it yourself | `af_heart` | cards |
 
-   Pronunciation respellings live in the shared `videos/tts/pronounce.json` and the project's `pronounce.json` (spoken text only; captions keep
-   the written form). Every build rewrites the NARRATION column of VIDEO-SCRIPT.md from `narration.txt`, so the script and the voice never
-   diverge: edit `narration.txt`, not the table.
-2. **Recording.** The recorder runs with `SCENE_INFO` (cue start offsets) and `SCENE_DURATIONS` (audio + 0.7 s per scene). Each on-screen action
-   starts when the narration sentence it illustrates begins (`at(k)` = the k-th sentence of the scene, counted from 0 across paragraphs) and a
-   scene never ends before its audio plus 0.7 s. A fresh throwaway Postgres and CityPulse (role `all`, city `paris`) are created for every take
-   (ports from `CITYPULSE_PORT_RANGE`, default 41500-41599). Tokens (`cp_...`) are blurred the moment they are rendered. The burst scenes run at
-   real speed: nothing is fast-forwarded. The narration pauses (`[pause 18]` in scene 8, `[pause 26]` in scene 9) are sized for the measured
-   timings (degraded about 30 s after the button, recovery 15 to 36 s after Stop) and the recorder checks the live verdict at those moments
-   (printed as `CHECK` lines; `FAIL` means the narration does not match the picture: lengthen the pause and rebuild).
-3. **Assembly.** Scene 2 must be filmed before scene 1 (the Overview needs a signed-in session), so the build cuts the recording back into script
-   order using the recorder's wall-clock marks and a calibration frame, places each scene's audio at its start time and encodes H.264 yuv420p +
-   AAC + a soft subtitle track (mov_text) with `+faststart` to `out/citypulse.mp4`.
-4. **Captions.** `out/citypulse.srt` is timed from the measured cue times (long sentences are split in two cues).
+**Real versus captured.** A local Postgres has no PostGIS and no `edb_*` extensions (`CREATE EXTENSION postgis` fails here: "extension is not
+available"), so those parts are never faked. The Map, the geo and vector part of the Explain card and the Insights come from real captures of the
+live AgentPG fleet (`videos/live-captures/`: `citypulse-map-gotham-*.jpg`, `citypulse-explain-*.jpg`, `paybroker-insights-*.jpg`,
+`extensions-installed.txt`, `ecoctl-insights.txt`), shown as stills with a slow zoom and highlight boxes under the banner *CAPTURED from the live
+AgentPG fleet, 28 Oct 2026*. Local scenes carry a green badge *RUNNING LOCALLY*. CityPulse has no AI model, so there is no stand-in model. Nothing
+is shown for high availability, failover or AIDB. The live fleet is never touched by the build.
 
-Options: `--skip-record` re-assembles from the last recording in `out/pw`, `--narration-only` only synthesises audio and prints durations; `BUILD_OUT`
-moves `out/`, `--name` changes the output name. Environment: `BUILD_TMP` (scratch for the throwaway Postgres and the ffmpeg shim),
-`PLAYWRIGHT_BROWSERS_PATH`, `CITYPULSE_PORT_RANGE`, `RECORD_WARMUP_S` (shorter warm-up for a rehearsal only), `RECORD_PG_BIN`, `RECORD_CITYPULSE_BIN`.
+What `build.py` does (same shape as the TrustDesk and PayBroker builds):
 
-If Playwright's own ffmpeg build is not installed, `build.py` creates a private browsers directory under `BUILD_TMP` (default `out/tmp`) that
-links the existing browsers and points Playwright's ffmpeg slot at the system ffmpeg (no download).
-If a scene gains, loses or reorders sentences, adjust the `at(k)` anchors in `record.spec.ts` (the recorder fails loudly when it asks for a
-sentence that does not exist). Scene 3 ends with the heatmap click that opens Sensors (there is no separate scene 3b in the narrated cut).
+1. Checks `narration.txt` against the NARRATION column of the scene table of `VIDEO-SCRIPT.md` (`python3 build.py --sync-script` rewrites the
+   column and the word counts from `narration.txt`; edit `narration.txt`, never the table).
+2. Speaks `narration.txt` with `videos/tts/narrate.py scenes` (Kokoro, local, speed 1.08): one wav per scene and `narration.json` (scene durations and
+   the start and end of every sentence). The heading of every section names the voice, `## 3 am_eric`. Respellings for the voice live in
+   `pronounce.json` (spoken text only; captions keep the written form), on top of the shared `videos/tts/pronounce.json`.
+3. Runs `record.spec.ts` (Playwright, real Chrome) with `NARRATION_JSON`: every scene lasts at least 0.2 s lead + narration + 0.5 s tail (audio
+   + 0.7 s) and each on-screen action waits for the sentence that illustrates it (`await at(page, 'words of the sentence')`), so a click, a
+   callout or a page change starts as that sentence begins. The recorder writes `scene-times.json` with a `sync` list (cue time against actual time,
+   `lateBy`), the `checks` made on the live burst and run notes.
+4. ffmpeg places each scene's audio at its start time, encodes, and adds the captions. It stops with an error if any scene is shorter than its
+   narration + 0.7 s, and prints how many cues were more than 1 s late.
 
-`out/` is git-ignored; do not commit media.
+The recorder asserts what the script claims (the new vendor's batch is accepted, the vendor appears in the `psql` grouping, five sections on the
+Explain card, the Map and Insights tabs say they are not available locally, the burst makes the verdict fall, PagerLens opens an incident that
+names the city, the read-only user is denied `api_token`, `/readyz` reports masking ok), so a take that drifts from the script fails instead of
+recording something false. The burst scene prints `CHECK` lines (verdict at the moment of "There it is", seconds since the press, a timeline);
+`FAIL` means the narration does not match the picture: move the cue or lengthen the narration and rebuild.
+
+Writing narration: one `## <scene id> <voice>` section per scene; short sentences, one idea each; a blank line is a pause, `...` a short beat,
+`[pause 1.5]` a deliberate pause (the shared tool halves it); never change voice inside a scene; voices only `am_liam`, `af_heart`, `am_eric`,
+male and female alternate, no voice twice in a row, never `af_nicole`. Acronyms are respelled hyphenated in `pronounce.json` (`PostGIS` is
+post-gee-eye-ess, `JSONB` jay-son-bee). If you change a sentence the recorder anchors an action to, update the matching `at(...)` text in
+`record.spec.ts` (it fails loudly when no sentence contains the text).
+
+Options and environment: `--deliver DIR` copies the mp4 and srt; `--work DIR` moves `out/build`; `--keep-recording` re-mixes a previous take;
+`--reuse-audio` keeps the narration already spoken; `--narration-only` prints scene durations and cue times; `--tts-dir` points to another
+Kokoro folder. `RECORD_WARMUP_S` (default 330) shortens the warm-up for a rehearsal (`RECORD_WARMUP_S=60 HOLD=0.6 npx playwright test`, which is not
+the final timing), `CITYPULSE_PORT_RANGE` limits the ports, `RECORD_PG_BIN`, `RECORD_CITYPULSE_BIN`, `RECORD_SIM_SPEED`, `E2E_SCRATCH` (where the
+throwaway data lives), `HEADED=1` shows the browser. Playwright's own ffmpeg build is not required: `build.py` creates a private
+`PLAYWRIGHT_BROWSERS_PATH` under the work folder that runs the system `ffmpeg` (no download).
+
+Never in the video: tokens (the terminal cards use shell variables, the browser never opens Settings), the one-time setup code and the demo
+password (used off camera only; the databases are deleted at the end).

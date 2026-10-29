@@ -1,1 +1,13 @@
-{"Lyon": "Lee-on", "Retry-After": "retry after", "curl": "curl"}
+{
+ "EDB": "ee-dee-bee",
+ "PostGIS": "post-gee-eye-ess",
+ "JSONB": "jay-son-bee",
+ "JSON": "jay-son",
+ "GIN": "jin",
+ "AgentPG": "agent pee-gee",
+ "pgvector": "pee-gee vector",
+ "SQL": "sequel",
+ "PagerLens": "Pager Lens",
+ "CityPulse": "City Pulse",
+ "PayBroker": "Pay Broker"
+}

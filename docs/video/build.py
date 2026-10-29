@@ -1,285 +1,246 @@
 #!/usr/bin/env python3
-"""One command from docs/VIDEO-SCRIPT.md + docs/video/record.spec.ts to the finished review cut.
+"""Builds the review cut of the tutorial video, from docs/VIDEO-SCRIPT.md and the recorder, with one command:
 
-    python3 docs/video/build.py [--name citypulse] [--deliver DIR] [--skip-record]
+    python3 docs/video/build.py [--work DIR] [--name citypulse] [--deliver DIR]
 
-Steps (all local, nothing is downloaded):
-  1. narration  : docs/video/narration.txt (written for listening; one `## <scene id>` section per scene) is spoken by Kokoro, a local
-                  neural voice (videos/tts/narrate.py, voices per topic (British, `## <scene> <voice>` in narration.txt), respellings in videos/tts/pronounce.json + docs/video/pronounce.json);
-                  out/audio/scene-<id>.wav and narration.json (scene durations + per-sentence cues). The NARRATION column of
-                  docs/VIDEO-SCRIPT.md is regenerated from narration.txt on every build, so script and voice cannot diverge.
-  2. record     : `npx playwright test` with SCENE_DURATIONS, so every scene lasts at least (audio + 0.7 s); the recorder writes
-                  out/timings.json (scene start times) next to the webm
-  3. assemble   : video trimmed to the title card, narration placed at the scene starts, H.264 yuv420p + AAC, +faststart -> out/<name>.mp4
-  4. captions   : out/<name>.srt, timed from the measured per-sentence audio
+Steps: 1 docs/video/narration.txt (written for listening; `## <scene id>` sections) is checked against the NARRATION column of
+the scene table in VIDEO-SCRIPT.md (they must not diverge); 2 videos/tts/narrate.py (Kokoro, local neural TTS, voice af_heart by default; the per-scene voice of the `## <id> <voice>` headers,
+shared + docs/video/pronounce.json respellings) speaks it: one wav per scene plus narration.json (scene durations and the start/end
+of every sentence); 3 the recorder (docs/video/record.spec.ts) is driven by that timing: each scene lasts audio + lead + tail and
+each on-screen action starts when the sentence that illustrates it begins; it writes the scene start times; 4 ffmpeg mixes the
+narration at the scene starts, encodes H.264/AAC and adds the captions (soft mov_text track in the mp4, and <name>.srt).
 
-Environment (optional):
-  BUILD_OUT                 output directory (default: docs/video/out)
-  TTS_DIR                   directory holding narrate.py and its .venv (default: ../videos/tts next to the project)
-  BUILD_TMP                 scratch directory for Playwright's ffmpeg shim and the throwaway Postgres (default: docs/video/out/tmp)
-  PLAYWRIGHT_BROWSERS_PATH  use a ready browsers directory instead of the generated shim
-  RECORD_PG_BIN, RECORD_CITYPULSE_BIN   see record.spec.ts
-  CITYPULSE_PORT_RANGE     "lo-hi" (default 41500-41599): every port the recorder opens is taken from this range
+Needs: ffmpeg/ffprobe, Node 22+, Google Chrome, the repository .venv, Postgres binaries, and the Kokoro tool in videos/tts (its own
+.venv and models; nothing is downloaded: override the folder with --tts-dir). See README.md.
+Playwright's own ffmpeg build is not needed: a private PLAYWRIGHT_BROWSERS_PATH under --work holds a wrapper that runs the
+system ffmpeg (no download). CITYPULSE_PORT_RANGE (default 41500-41599) limits the ports the recorder uses.
+Output: <work>/<name>.mp4, <name>.srt (and a copy in --deliver when given). docs/video/out/ is git-ignored.
 """
-import argparse, json, os, re, shutil, subprocess, sys
-from pathlib import Path
+import argparse, glob, json, os, re, shutil, subprocess, sys, tempfile
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
-SCRIPT = ROOT / "docs" / "VIDEO-SCRIPT.md"
-OUT = Path(os.environ.get("BUILD_OUT") or HERE / "out")
-NARRATION = HERE / "narration.txt"
-TTS = Path(os.environ.get("TTS_DIR") or ROOT.parent / "videos" / "tts")
-VOICE = "bf_isabella"      # default voice; narration.txt names the voice of every scene
-MARGIN = 0.7          # a scene lasts at least audio + MARGIN seconds
-FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPT = os.path.join(HERE, '..', 'VIDEO-SCRIPT.md')
+NARRATION = os.path.join(HERE, 'narration.txt')
+PRONOUNCE = os.path.join(HERE, 'pronounce.json')
+VOICE = 'af_heart'
+LEAD = 0.2  # silence before the voice in a scene (seconds); the pauses inside a scene are in narration.txt
+FFMPEG = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
+FFPROBE = shutil.which('ffprobe') or '/opt/homebrew/bin/ffprobe'
 
 
-def run(cmd, **kw):
-    return subprocess.run([str(c) for c in cmd], check=True, **kw)
+def run(*a, **kw):
+    return subprocess.run(a, check=True, **kw)
 
 
-def duration(path):
-    r = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
-                       check=True, capture_output=True, text=True)
-    return float(r.stdout.strip())
-
-
-def read_narration():
-    """{scene id: [paragraph text, ...]} from narration.txt (pause markers kept as `[pause x]` / `...` lines)."""
-    parts = re.split(r"(?m)^##\s+(\S+)(?:[ \t]+\S+)?[ \t]*$", NARRATION.read_text())
+def narration_sections():
+    """{scene id: text} from narration.txt (`## <id>` headings)."""
+    parts = re.split(r'(?m)^##\s+(\S+)(?:[ \t]+\S+)?[ \t]*$', open(NARRATION, encoding='utf-8').read())
     return {sid: body.strip() for sid, body in zip(parts[1::2], parts[2::2])}
 
 
-def spoken_cell(body):
-    """The script-table form of a scene's narration: sentences in order, deliberate pauses as [pause x], beats dropped."""
-    text = []
-    for line in body.splitlines():
-        s = line.strip()
-        if not s or s == "...":
+def table_cells():
+    """{scene id: NARRATION cell text (without the quotes)} from the scene table of VIDEO-SCRIPT.md."""
+    out = {}
+    for line in open(SCRIPT, encoding='utf-8'):
+        if not re.match(r'\|\s*\d+\s*\|', line):
             continue
-        text.append(s)
-    return " ".join(text)
-
-
-def mirror_script():
-    """Rewrite the NARRATION column of docs/VIDEO-SCRIPT.md from narration.txt (table format kept)."""
-    cells = {sid: spoken_cell(b) for sid, b in read_narration().items()}
-    out, seen = [], set()
-    for line in SCRIPT.read_text().splitlines():
-        m = re.match(r"^\|\s*(\d+[a-z]?)\s*\|", line)
-        if m and m.group(1) in cells:
-            c = re.split(r"(?<!\\)\|", line)
-            if len(c) >= 7:
-                c[4] = ' "' + cells[m.group(1)].replace("|", "\\|") + '" '
-                line = "|".join(c)
-                seen.add(m.group(1))
-        out.append(line)
-    missing = set(cells) - seen
-    if missing:
-        sys.exit(f"narration.txt scenes missing from the script table: {sorted(missing)}")
-    SCRIPT.write_text("\n".join(out) + "\n")
-
-
-def narration():
-    mirror_script()
-    audio = OUT / "audio"
-    shutil.rmtree(audio, ignore_errors=True)
-    audio.mkdir(parents=True)
-    py = TTS / ".venv" / "bin" / "python"
-    run([py, TTS / "narrate.py", "scenes", NARRATION, audio, "--voice", VOICE, "--pronounce", HERE / "pronounce.json"])
-    raw = json.loads((audio / "narration.json").read_text())
-    info = {}
-    for sid, v in raw.items():
-        info[sid] = {"audio": v["duration"], "offsets": [c["start"] for c in v["cues"]], "cues": v["cues"]}
-        print(f"scene {sid}: {v['duration']:.1f} s, {len(v['cues'])} sentences")
-    (audio / "durations.json").write_text(json.dumps(info, indent=1))
-    # the recorder reads a flat {scene: seconds the scene must last at least}
-    (audio / "scene-min.json").write_text(json.dumps({k: round(v["audio"] + MARGIN, 3) for k, v in info.items()}))
-    return info
-
-
-def pw_env():
-    env = dict(os.environ)
-    tmp = Path(env.get("BUILD_TMP") or OUT / "tmp")
-    tmp.mkdir(parents=True, exist_ok=True)
-    env.setdefault("E2E_SCRATCH", str(tmp))
-    env.setdefault("CITYPULSE_PORT_RANGE", "41500-41599")
-    if "PLAYWRIGHT_BROWSERS_PATH" not in env:
-        # Playwright's own ffmpeg build may be missing: point the revision it wants at the system ffmpeg (no download)
-        spec = json.loads((HERE / "node_modules/playwright-core/browsers.json").read_text())
-        rev = next(b["revision"] for b in spec["browsers"] if b["name"] == "ffmpeg")
-        cache = Path.home() / "Library/Caches/ms-playwright"
-        if cache.exists() and not (cache / f"ffmpeg-{rev}" / "INSTALLATION_COMPLETE").exists():
-            shim = tmp / "browsers"
-            (shim / f"ffmpeg-{rev}").mkdir(parents=True, exist_ok=True)
-            for d in cache.iterdir():
-                if d.is_dir() and not d.name.startswith(".") and not (shim / d.name).exists():
-                    (shim / d.name).symlink_to(d)
-            link = shim / f"ffmpeg-{rev}" / "ffmpeg-mac"
-            if not link.exists():
-                link.symlink_to(FFMPEG)
-            for f in ("INSTALLATION_COMPLETE", "DEPENDENCIES_VALIDATED"):
-                (shim / f"ffmpeg-{rev}" / f).touch()
-            env["PLAYWRIGHT_BROWSERS_PATH"] = str(shim)
-    return env
-
-
-def record():
-    env = pw_env()
-    env["SCENE_DURATIONS"] = str(OUT / "audio" / "scene-min.json")
-    env["SCENE_INFO"] = str(OUT / "audio" / "durations.json")
-    env["TIMINGS_OUT"] = str(OUT / "timings.json")
-    env["VIDEO_DIR"] = str(OUT / "pw")
-    env.pop("PACE", None)
-    env.pop("NOVIDEO", None)
-    shutil.rmtree(OUT / "pw", ignore_errors=True)
-    (OUT / "timings.json").unlink(missing_ok=True)
-    run([HERE / "node_modules" / ".bin" / "playwright", "test", "-c", "playwright.config.ts", "--output", OUT / "pw" / "t"], cwd=HERE, env=env)
-    return last_webm()
-
-
-def last_webm():
-    webms = sorted((OUT / "pw").rglob("*.webm"), key=lambda p: p.stat().st_mtime)
-    if not webms:
-        sys.exit("no video produced")
-    return webms[-1]
-
-
-def first_dark(webm, thresh=60):
-    """Video time of the first frame whose average luma is below thresh (the dark title card = scene 1 start)."""
-    out = subprocess.run([FFMPEG, "-v", "info", "-i", str(webm), "-vf",
-                          "fps=25,scale=64:36,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"],
-                         capture_output=True, text=True).stderr
-    t = None
-    for line in out.splitlines():
-        m = re.search(r"pts_time:([\d.]+)", line)
-        if m:
-            t = float(m.group(1))
-        m = re.search(r"YAVG=([\d.]+)", line)
-        if m and t is not None and float(m.group(1)) < thresh:
-            return t
-    sys.exit("title card not found in video")
-
-
-def srt_time(t):
-    ms = int(round(t * 1000))
-    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
-
-
-def chunks(text, limit=84):
-    """Split a long sentence into caption-sized pieces at word boundaries."""
-    if len(text) <= limit:
-        return [text]
-    n = -(-len(text) // limit)
-    target = len(text) / n
-    out, cur = [], ""
-    for w in text.split():
-        if cur and len(cur) + 1 + len(w) > target * 1.1:
-            out.append(cur)
-            cur = w
-        else:
-            cur = (cur + " " + w).strip()
-    if cur:
-        out.append(cur)
+        cells = [c.strip() for c in re.split(r'(?<!\\)\|', line.strip().strip('|'))]
+        m = re.match(r'^"(.*)"$', cells[4], re.S)
+        out[cells[0]] = m.group(1) if m else cells[4]
     return out
 
 
-def update_times(rel, total):
-    """Refresh the time column of the script table from the measured scene starts."""
-    ids = sorted(rel)
-    fmt = lambda t: f"{int(t) // 60}:{int(t) % 60:02d}"
+def cell_text(section):
+    """What the NARRATION column holds for a narration.txt section: paragraphs joined by spaces, explicit pauses kept, beats (...) dropped."""
+    lines = [ln.strip() for ln in section.splitlines()]
+    return re.sub(r'\s+', ' ', ' '.join(ln for ln in lines if ln and ln != '...')).strip()
+
+
+def check_script_in_sync():
+    """The script table and the voice must never diverge: stop if any NARRATION cell differs from narration.txt."""
+    sections, cells = narration_sections(), table_cells()
+    if list(sections) != list(cells):
+        sys.exit(f'scene ids differ: narration.txt {list(sections)} vs VIDEO-SCRIPT.md {list(cells)}')
+    for sid, text in sections.items():
+        if cell_text(text) != cells[sid]:
+            sys.exit(f'scene {sid}: the NARRATION cell of VIDEO-SCRIPT.md differs from docs/video/narration.txt (edit both together; see README)')
+
+
+def sync_script():
+    """Rewrites the Words and NARRATION cells of the scene table from narration.txt (convenience: edit narration.txt, run --sync-script)."""
+    sections = narration_sections()
     out = []
-    for line in SCRIPT.read_text().splitlines():
-        m = re.match(r"^\|\s*(\d+)\s*\|", line)
-        if m and int(m.group(1)) in rel:
-            n = int(m.group(1))
-            end = rel[n + 1] if n + 1 in rel else total
-            c = re.split(r"(?<!\\)\|", line)
-            c[2] = f" {fmt(rel[n])} - {fmt(end)} "
-            line = "|".join(c)
+    for line in open(SCRIPT, encoding='utf-8').read().splitlines():
+        m = re.match(r'\|\s*(\d+)\s*\|', line)
+        if m and m.group(1) in sections:
+            c = re.split(r'(?<!\\)\|', line)
+            text = cell_text(sections[m.group(1)])
+            c[3] = f' {len(re.sub(r"\[pause [^]]*\]", "", text).split())} '
+            c[5] = ' "' + text.replace('|', '\\|') + '" '
+            line = '|'.join(c)
         out.append(line)
-    SCRIPT.write_text("\n".join(out) + "\n")
+    open(SCRIPT, 'w', encoding='utf-8').write('\n'.join(out) + '\n')
 
 
-def assemble(webm, info, name):
-    """Cut the recording into the final order (scene 1 was filmed after scene 2), place the audio, encode, write captions."""
-    timing = json.loads((OUT / "timings.json").read_text())
-    m = {int(k): v for k, v in timing["scene_start_ms"].items()}
-    end = timing["end_ms"]
-    v0 = first_dark(webm)                       # video time of the calibration frame (a dark card the recorder shows at wall time calib_ms)
-    V = lambda wall: v0 + (wall - timing["calib_ms"]) / 1000
-    # recorded order 2, 1, 3, ... 11; final order 1, 2, 3, ... 11
-    seg1, seg2, rest = (V(m[1]), V(m[3])), (V(m[2]), V(m[1])), (V(m[3]), V(end))
-    l1, l2 = seg1[1] - seg1[0], seg2[1] - seg2[0]
-    rel = {1: 0.0, 2: l1, 3: l1 + l2}
-    for n in m:
-        if n >= 3:
-            rel[n] = l1 + l2 + (m[n] - m[3]) / 1000
-    total = l1 + l2 + (end - m[3]) / 1000
-    print(f"video offset {v0:.2f} s, total {total:.1f} s")
-    for c in timing.get("checks", []):
-        print("CHECK", c)
-    update_times(rel, total)
-    cues, idx = [], 1
-    for n in sorted(info, key=int):
-        t = rel[int(n)]
-        for c in info[n]["cues"]:
-            pieces = chunks(c["text"])
-            tot = sum(len(p) for p in pieces)
-            u, dur = t + c["start"], c["end"] - c["start"]
-            for p in pieces:
-                d = dur * len(p) / tot
-                cues.append(f"{idx}\n{srt_time(u)} --> {srt_time(u + d)}\n{p}\n")
-                idx += 1
-                u += d
-    srt = OUT / f"{name}.srt"
-    srt.write_text("\n".join(cues))
-    inputs, filt = [], []
-    for i, n in enumerate(sorted(info, key=int)):
-        inputs += ["-i", OUT / "audio" / f"scene-{n}.wav"]
-        ms = int(rel[int(n)] * 1000)
-        filt.append(f"[{i + 1}:a]adelay={ms}|{ms}[a{i}]")
-    k = len(info)
-    mix = "".join(f"[a{i}]" for i in range(k)) + f"amix=inputs={k}:normalize=0:dropout_transition=0,apad,atrim=0:{total:.3f}[aout]"
-    cut = ";".join(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,fps=25[c{i}]" for i, (a, b) in enumerate([seg1, seg2, rest]))
-    cut += ";[c0][c1][c2]concat=n=3:v=1:a=0,scale=out_range=tv,format=yuv420p[v]"
-    mp4 = OUT / f"{name}.mp4"
-    run([FFMPEG, "-v", "error", "-y", "-i", webm, *inputs, "-i", srt,
-         "-filter_complex", cut + ";" + ";".join(filt) + ";" + mix,
-         "-map", "[v]", "-map", "[aout]", "-map", f"{len(info) + 1}:s", "-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", "-t", f"{total:.3f}", mp4])
-    print("wrote", mp4, f"({duration(mp4):.1f} s)")
-    if any(c.startswith("FAIL") for c in timing.get("checks", [])):
-        print("WARNING: a live check failed (see CHECK FAIL above): the narration does not match the picture, adjust the pauses and rebuild")
-    return mp4, srt
+def duration(path):
+    return float(subprocess.check_output([FFPROBE, '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path], text=True))
+
+
+def make_audio(work, tts_dir, reuse):
+    """narrate.py scenes ... -> one wav per scene + narration.json. Returns {id: {wav, dur, cues:[(start, end, sentence)]}}."""
+    adir = os.path.join(work, 'audio')
+    meta = os.path.join(adir, 'narration.json')
+    if not (reuse and os.path.exists(meta)):
+        os.makedirs(adir, exist_ok=True)
+        py = os.path.join(tts_dir, '.venv', 'bin', 'python')
+        run(py, os.path.join(tts_dir, 'narrate.py'), 'scenes', NARRATION, adir, '--voice', VOICE, '--pronounce', PRONOUNCE)
+    data = json.load(open(meta))
+    return {sid: {'wav': os.path.join(adir, f'scene-{sid}.wav'), 'dur': v['duration'], 'cues': [(c['start'], c['end'], c['text']) for c in v['cues']]} for sid, v in data.items()}, meta
+
+
+def srt_time(t):
+    ms = round(t * 1000)
+    return f'{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}'
+
+
+def chunks(sentence, limit=84):
+    """Splits a sentence into caption lines of at most `limit` characters, at word boundaries."""
+    out, cur = [], ''
+    for w in sentence.split():
+        if cur and len(cur) + 1 + len(w) > limit:
+            out.append(cur)
+            cur = w
+        else:
+            cur = f'{cur} {w}'.strip()
+    return out + [cur]
+
+
+def write_srt(path, info, starts):
+    n_cue, lines = 0, []
+    for n in info:
+        for a, b, s in info[n]['cues']:
+            parts = chunks(s)
+            total = sum(len(p) for p in parts)
+            t = starts[n] + LEAD + a
+            for p in parts:
+                d = (b - a) * len(p) / total
+                n_cue += 1
+                lines.append(f'{n_cue}\n{srt_time(t)} --> {srt_time(t + d)}\n{p}\n')
+                t += d
+    open(path, 'w', encoding='utf-8').write('\n'.join(lines))
+
+
+def browsers_path(work):
+    """A private PLAYWRIGHT_BROWSERS_PATH: links to the installed browsers and an ffmpeg wrapper around the system ffmpeg."""
+    rev = json.load(open(os.path.join(HERE, 'node_modules', 'playwright-core', 'browsers.json')))
+    rev = next(b['revision'] for b in rev['browsers'] if b['name'] == 'ffmpeg')
+    cache = os.environ.get('PLAYWRIGHT_BROWSERS_PATH') or os.path.expanduser('~/Library/Caches/ms-playwright')
+    if os.path.exists(os.path.join(cache, f'ffmpeg-{rev}', 'ffmpeg-mac')):
+        return cache
+    bp = os.path.join(work, 'browsers')
+    os.makedirs(os.path.join(bp, f'ffmpeg-{rev}'), exist_ok=True)
+    for d in glob.glob(os.path.join(cache, '*')):
+        link = os.path.join(bp, os.path.basename(d))
+        if not os.path.lexists(link):
+            os.symlink(d, link)
+    wrapper = os.path.join(bp, f'ffmpeg-{rev}', 'ffmpeg-mac')
+    open(wrapper, 'w').write(f'#!/bin/sh\nexec {FFMPEG} "$@"\n')
+    os.chmod(wrapper, 0o755)
+    for f in ('INSTALLATION_COMPLETE', 'DEPENDENCIES_VALIDATED'):
+        open(os.path.join(bp, f'ffmpeg-{rev}', f), 'w').close()
+    return bp
+
+
+def video_offset(webm, card_at):
+    """Seconds between the start of the webm and the recorder's clock zero: the title card (dark) first shows at card_at."""
+    # ffmpeg 8 names the key lavfi.signalstats.YAVG (older builds: lavfi.signal_stats.YAVG) and prints it to the log, not to stdout
+    p = subprocess.run([FFMPEG, '-t', '900', '-i', webm, '-vf', 'fps=20,scale=64:36,signalstats,metadata=print', '-f', 'null', '-'], capture_output=True, text=True)
+    t = None
+    for line in (p.stdout + p.stderr).splitlines():
+        m = re.search(r'frame:\d+\s+pts:\d+\s+pts_time:([\d.]+)', line)
+        if m:
+            t = float(m.group(1))
+        m = re.search(r'lavfi\.signal_?stats\.YAVG=([\d.]+)', line)
+        if m and t is not None and float(m.group(1)) < 80:  # the card is dark blue; the blank page is white
+            return t - card_at
+    return 0.0
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--name", default="citypulse")
-    ap.add_argument("--deliver", help="also copy the mp4 and srt into this directory")
-    ap.add_argument("--skip-record", action="store_true", help="re-assemble from the last recording in out/pw")
-    ap.add_argument("--narration-only", action="store_true", help="only synthesise audio and print durations")
+    ap.add_argument('--work', default=None, help='scratch directory (default: docs/video/out/build)')
+    ap.add_argument('--name', default='citypulse')
+    ap.add_argument('--deliver', default=None, help='also copy <name>.mp4 and <name>.srt here')
+    ap.add_argument('--tts-dir', default=os.path.join(HERE, '..', '..', '..', 'videos', 'tts'), help='folder with narrate.py, its .venv and models')
+    ap.add_argument('--sync-script', action='store_true', help='rewrite the NARRATION and Words cells of VIDEO-SCRIPT.md from narration.txt, then stop')
+    ap.add_argument('--narration-only', action='store_true', help='speak the narration, print scene durations and cue times, stop')
+    ap.add_argument('--reuse-audio', action='store_true', help='keep the narration of a previous run in --work/audio')
+    ap.add_argument('--keep-recording', action='store_true', help='reuse the webm and scene times of a previous take in --work')
     a = ap.parse_args()
-    OUT.mkdir(exist_ok=True)
-    if a.skip_record:
-        info = {k: v for k, v in json.loads((OUT / "audio" / "durations.json").read_text()).items()}
-        webm = last_webm()
-    else:
-        info = narration()
-        if a.narration_only:
-            return
-        webm = record()
-    mp4, srt = assemble(webm, info, a.name)
+    work = os.path.abspath(a.work or os.path.join(HERE, 'out', 'build'))
+    os.makedirs(work, exist_ok=True)
+
+    if not os.path.isdir(os.path.join(HERE, 'node_modules')):
+        run('npm', 'install', cwd=HERE)
+    if a.sync_script:
+        sync_script()
+        print('VIDEO-SCRIPT.md updated from narration.txt')
+        return
+    check_script_in_sync()
+    info, narration_json = make_audio(work, os.path.abspath(a.tts_dir), a.reuse_audio)
+    print('audio seconds per scene:', {n: round(v['dur'], 1) for n, v in info.items()}, 'total', round(sum(v['dur'] for v in info.values()), 1))
+    if a.narration_only:
+        for n, v in info.items():
+            print(f'scene {n}: {v["dur"]:.1f} s')
+            for st, en, tx in v['cues']:
+                print(f'   {st:6.1f} {tx[:90]}')
+        return
+
+    rec = os.path.join(work, 'rec')
+    times_json = os.path.join(work, 'scene-times.json')
+    if not a.keep_recording:
+        shutil.rmtree(rec, ignore_errors=True)
+        env = dict(os.environ, NARRATION_JSON=narration_json, TIMES_JSON=times_json, PLAYWRIGHT_BROWSERS_PATH=browsers_path(work), TMPDIR=os.path.join(work, 'tmp'))
+        os.makedirs(env['TMPDIR'], exist_ok=True)
+        run('npx', 'playwright', 'test', f'--output={rec}', cwd=HERE, env=env)
+    webm = glob.glob(os.path.join(rec, '**', '*.webm'), recursive=True)
+    if len(webm) != 1:
+        sys.exit(f'expected one recording in {rec}, found {webm}')
+    webm = webm[0]
+    tm = json.load(open(times_json))
+    off = video_offset(webm, tm['cardAt'])
+    starts = {str(s['scene']): s['start'] for s in tm['scenes']}  # recorder clock; the video is cut `off` seconds in
+    ends = {str(s['scene']): s['end'] for s in tm['scenes']}
+    for n, v in info.items():
+        room = ends[n] - starts[n] - LEAD - v['dur']
+        print(f'scene {n}: {starts[n]:7.1f}s .. {ends[n]:7.1f}s  audio {v["dur"]:5.1f}s  room after voice {room:4.1f}s')
+        if room < 0.45:
+            sys.exit(f'scene {n} is shorter than its narration + 0.7 s (lead 0.2 + tail 0.5)')
+    late = [x for x in tm.get('sync', []) if x['lateBy'] > 1.0]
+    print(f'sync: {len(tm.get("sync", []))} cues, {len(late)} more than 1 s late', *[f"\n  scene {x['scene']} '{x['key']}' {x['lateBy']}s" for x in late])
+
+    srt = os.path.join(work, a.name + '.srt')
+    write_srt(srt, info, starts)
+    cmd = [FFMPEG, '-v', 'error', '-y', '-ss', f'{max(0.0, off):.3f}', '-i', webm]
+    for n in info:
+        cmd += ['-i', info[n]['wav']]
+    cmd += ['-i', srt]
+    fc = ''.join(f'[{i}:a]adelay={round((starts[n] + LEAD) * 1000)}:all=1[a{i}];' for i, n in enumerate(info, 1))
+    fc += ''.join(f'[a{i}]' for i in range(1, len(info) + 1)) + f'amix=inputs={len(info)}:normalize=0:duration=longest,apad=whole_dur={ends[list(info)[-1]]:.3f}[aud]'
+    end = ends[list(info)[-1]]
+    final = os.path.join(work, a.name + '.mp4')
+    cmd += ['-filter_complex', fc, '-map', '0:v', '-map', '[aud]', '-map', f'{len(info) + 1}:s',
+            '-t', f'{end:.2f}', '-r', '25',
+            '-vf', 'scale=out_range=tv,format=yuv420p', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '160k', '-ar', '44100',
+            '-c:s', 'mov_text', '-metadata:s:s:0', 'language=eng', '-movflags', '+faststart', final]
+    run(*cmd)
+    print('final:', final, f'{duration(final):.1f}s')
     if a.deliver:
-        d = Path(a.deliver)
-        d.mkdir(parents=True, exist_ok=True)
-        shutil.copy(mp4, d / mp4.name)
-        shutil.copy(srt, d / srt.name)
-        print("delivered to", d)
+        os.makedirs(a.deliver, exist_ok=True)
+        for f in (final, srt):
+            shutil.copy(f, a.deliver)
+        print('delivered to', a.deliver)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
