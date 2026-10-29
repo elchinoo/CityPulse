@@ -384,6 +384,62 @@ def test_derived_areas_for_external_cities_cover_their_sensors(client, postgis):
         assert c.execute("SELECT count(*) AS n FROM district_area WHERE source = 'builtin'").fetchone()["n"] == len(geo.CITIES) * len(catalog.DISTRICTS)
 
 
+def _point_inside(geometry, k):
+    """A deterministic interior point (lon, lat) of a GeoJSON Polygon or MultiPolygon, found with the pure-Python reference test."""
+    polys = [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+    xs = [x for p in polys for x, _ in p[0]]
+    ys = [y for p in polys for _, y in p[0]]
+    for i in range(1, 60):
+        for j in range(1, 60):
+            lon = min(xs) + (max(xs) - min(xs)) * ((i * 7 + k * 13) % 59 + 0.5) / 60
+            lat = min(ys) + (max(ys) - min(ys)) * ((j * 11 + k * 5) % 59 + 0.5) / 60
+            if any(geo.ring_contains(p[0], lon, lat) and not any(geo.ring_contains(h, lon, lat) for h in p[1:]) for p in polys):
+                return lon, lat
+    raise AssertionError("no interior point")
+
+
+def test_real_boundaries_are_stored_valid_and_contain_the_sensors_placed_inside_them(client, postgis):
+    """Brussels and Vienna districts (MultiPolygons included) are in district_area with source 'boundary', valid, and ST_Contains agrees
+    with the pure-Python reference for a sensor placed inside each district (the simulator does exactly that)."""
+    from citypulse import boundaries
+    with connect() as c:
+        stored = c.execute("SELECT city, count(*) AS n, bool_and(ST_IsValid(geom)) AS ok FROM district_area WHERE source = 'boundary' GROUP BY city ORDER BY city").fetchall()
+        col = c.execute("SELECT format_type(a.atttypid, a.atttypmod) AS t FROM pg_attribute a WHERE a.attrelid = 'district_area'::regclass AND a.attname = 'geom'").fetchone()["t"]
+    assert [(r["city"], r["n"], r["ok"]) for r in stored] == [("brussels", 19, True), ("vienna", 23, True)]
+    assert col == "geometry(Geometry,4326)", "wide enough for a commune made of several parts"
+    items, expected = [], {}
+    for k, d in enumerate(boundaries.districts("brussels")):
+        lon, lat = _point_inside(d["geometry"], k)
+        expected[d["id"]] = 2
+        items += [reading(f"brussels.s-{d['id']}-{i}", city="brussels", district=d["id"], lat=round(lat + i * 1e-6, 6), lon=lon) for i in range(2)]
+    assert gateway.accept(items)["accepted"] == len(items)
+    login(client)
+    gj = client.get("/api/districts/geojson?city=brussels").json()
+    props = {f["properties"]["district"]: f["properties"] for f in gj["features"]}
+    assert set(props) == set(expected) and all(p["source"] == "boundary" for p in props.values())
+    assert {d: p["total"] for d, p in props.items()} == expected and all(p["reported_elsewhere"] == 0 for p in props.values())
+    assert props["molenbeek-saint-jean"]["name"] == "Molenbeek-Saint-Jean"
+    assert "OpenStreetMap" in gj["attribution"]
+    near = client.get("/api/sensors/nearby?lat=50.8467&lon=4.3525&radius_m=3000&city=brussels").json()
+    assert near["available"] and all(s["distance_m"] <= 3000 for s in near["sensors"])
+    with connect() as c:
+        c.execute("DELETE FROM sensor WHERE city = 'brussels'")
+        c.commit()
+
+
+def test_a_real_boundary_replaces_a_derived_area_and_derived_never_overwrites_it(client, postgis):
+    with connect() as c:
+        c.execute("UPDATE district_area SET source = 'derived', geom = ST_Buffer(ST_Centroid(geom::geography)::geography, 100)::geometry "
+                  "WHERE city = 'brussels' AND district = 'ixelles'")
+        c.commit()
+        geo.ensure(c)                                                   # what every start does
+        row = c.execute("SELECT source, ST_Area(geom::geography) AS m2 FROM district_area WHERE city = 'brussels' AND district = 'ixelles'").fetchone()
+        assert row["source"] == "boundary" and row["m2"] > 1_000_000, "the real polygon is back (Ixelles is about 6 km2)"
+        written = geo.refresh_derived_areas(c)["written"]
+        assert c.execute("SELECT source FROM district_area WHERE city = 'brussels' AND district = 'ixelles'").fetchone()["source"] == "boundary"
+    assert written >= 0
+
+
 def test_sensors_geojson_lists_located_sensors_as_points(client, postgis):
     gateway.accept([reading("paris.a-d01-0001", lat=48.84, lon=2.32), reading("paris.b-d01-0002", lat=48.85, lon=2.33), reading("paris.c-d01-0003")])
     with connect() as c:

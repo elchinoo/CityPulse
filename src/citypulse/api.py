@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__,
+    boundaries,
     chaos,
     core,
     explain,
@@ -529,6 +530,14 @@ def districts_geojson(city: str | None = CityParam):
             return geo.districts_geojson(conn, city)
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc
+
+
+@app.get("/api/geo/context", dependencies=[Depends(require("city:read"))])
+def geo_context(city: str = CityParam):
+    """Base-map layers of a city with real boundaries (water, waterways, parks, main roads) as GeoJSON, with the attribution the map must
+    show. Served from the bundled files: no database, no PostGIS. Another city gets an empty collection."""
+    _api_role()
+    return JSONResponse(boundaries.context(city), headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/insights", dependencies=[Depends(require("settings:manage"))])

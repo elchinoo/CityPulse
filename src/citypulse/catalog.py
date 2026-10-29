@@ -9,6 +9,8 @@ import math
 import re
 from dataclasses import dataclass
 
+from . import boundaries
+
 DISTRICTS: dict[str, str] = {
     "d01": "Harbor", "d02": "Old Town", "d03": "Financial Quarter", "d04": "University Hill",
     "d05": "Riverside", "d06": "Airport Zone", "d07": "Northgate", "d08": "Tech Park",
@@ -17,9 +19,10 @@ DISTRICTS: dict[str, str] = {
 
 
 def district_name(district_id: str) -> str:
-    """Display name of a district id. The built-in simulator's legacy ids (d01..d12) keep their catalogue name; any other
-    id (a city may name its districts freely: `alder-quay`) is prettified: separators become spaces, each word capitalised."""
-    known = DISTRICTS.get(district_id)
+    """Display name of a district id. The built-in simulator's legacy ids (d01..d12) keep their catalogue name, the districts of a
+    city with real boundaries their real name (`molenbeek-saint-jean` is Molenbeek-Saint-Jean); any other id (a city may name its
+    districts freely: `alder-quay`) is prettified: separators become spaces, each word capitalised."""
+    known = DISTRICTS.get(district_id) or boundaries.names().get(district_id)
     return known or " ".join(w.capitalize() for w in district_id.replace("-", " ").replace("_", " ").split()) or district_id
 
 

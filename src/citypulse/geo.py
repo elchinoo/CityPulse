@@ -12,7 +12,14 @@ corners are shared by neighbouring cells and shifted by a fixed pseudo-random am
 tile without gaps but are not rectangles. A sensor is placed from a hash of its id inside the middle half of its district's cell,
 which can never reach the shifted edge, so it always lies inside its polygon.
 
-Derived geography. A fleet that is not the built-in simulator (a real one, or an external simulator in a city such as "gotham")
+Real boundaries. A city that has files in `geodata/` (see boundaries.py: Brussels with its 19 communes, Vienna with its 23 districts) gets
+its REAL district polygons, stored by `ensure` with source 'boundary' (a real commune can be a MultiPolygon, so the column type is the
+generic geometry(Geometry, 4326); an older table of Polygon is altered once). The simulator places each sensor inside the polygon
+of its district, so `ST_Contains` agrees with the id the sensor reports. A boundary row replaces a 'derived' one of the same
+district; it is never touched by the derived refresh, and districts without a real polygon (a sensor that reports another id)
+still get a derived area.
+
+Derived geography. A fleet that is not the built-in simulator (a real one, or an external simulator in a city that has no files in geodata/)
 has no polygons, but its sensors report positions. `refresh_derived_areas` computes one area per (city, district) that has located
 sensors and no built-in polygon: the convex hull of the sensors (ST_ConvexHull over ST_Collect), grown by a few metres of
 geography buffer (ST_Buffer) so it is never razor-thin, or just a buffered point or line when the sensors are fewer than three or
@@ -30,6 +37,7 @@ import time
 
 import psycopg
 
+from . import boundaries
 from .catalog import DISTRICTS, district_name
 
 log = logging.getLogger("citypulse.geo")
@@ -45,6 +53,7 @@ CELL_LAT = 0.0125                  # degrees of latitude per cell, about 1.39 km
 SHIFT = 0.18                       # corner shift, as a share of a cell
 INNER = 0.5                        # sensors use the middle INNER x INNER of a cell
 BUILTIN = "builtin"
+BOUNDARY = "boundary"               # a real district polygon from geodata/ (OpenStreetMap, open data of the city)
 DERIVED = "derived"
 HULL_BUFFER_M = 40                 # grown around a hull of three or more points (metres, geography)
 POINT_BUFFER_M = 75                # around a single point or a straight line of points
@@ -166,15 +175,26 @@ SCHEMA = [
     "CREATE TABLE IF NOT EXISTS district_area ("
     " city text NOT NULL CHECK (city ~ '^[a-z0-9][a-z0-9_-]{0,31}$'),"
     " district text NOT NULL CHECK (district ~ '^[a-z0-9][a-z0-9_-]{0,23}$'),"
-    " geom geometry(Polygon, 4326) NOT NULL,"
+    " geom geometry(Geometry, 4326) NOT NULL,"
     " source text NOT NULL DEFAULT 'builtin',"
     " PRIMARY KEY (city, district))",
+    # A table created by an earlier version holds Polygon only; real communes can be MultiPolygons. Altered once (the test is the column's
+    # declared type), the GiST index is rebuilt by the ALTER.
+    "DO $$ BEGIN IF (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = to_regclass('district_area') "
+    "AND a.attname = 'geom' AND NOT a.attisdropped) = 'geometry(Polygon,4326)' THEN "
+    "ALTER TABLE district_area ALTER COLUMN geom TYPE geometry(Geometry, 4326); END IF; END $$",
     "CREATE INDEX IF NOT EXISTS district_area_gist ON district_area USING gist (geom)",
 ]
 UPSERT_AREA = (
     "INSERT INTO district_area (city, district, geom, source) VALUES (%s, %s, ST_GeomFromText(%s, 4326), %s) "
     "ON CONFLICT (city, district) DO UPDATE SET geom = EXCLUDED.geom "
     "WHERE district_area.source = %s AND NOT ST_OrderingEquals(district_area.geom, EXCLUDED.geom)")
+# Real boundaries replace derived areas of the same district and refresh themselves (only a changed geometry or source is written).
+UPSERT_BOUNDARY = (
+    "INSERT INTO district_area (city, district, geom, source) VALUES (%s, %s, ST_GeomFromText(%s, 4326), 'boundary') "
+    "ON CONFLICT (city, district) DO UPDATE SET geom = EXCLUDED.geom, source = 'boundary' "
+    "WHERE district_area.source IN ('derived', 'boundary') "
+    "AND (district_area.source <> 'boundary' OR NOT ST_OrderingEquals(district_area.geom, EXCLUDED.geom))")
 
 
 # One statement. `grouped` has one row per (city, district) with located sensors whose ids fit the table's CHECK constraints; the hull
@@ -187,7 +207,7 @@ REFRESH_DERIVED = (
     "FROM (SELECT s.city, s.district, ST_ConvexHull(ST_Collect(s.geom::geometry)) AS hull FROM sensor s "
     "      WHERE s.geom IS NOT NULL AND s.city ~ '^[a-z0-9][a-z0-9_-]{0,31}$' AND s.district ~ '^[a-z0-9][a-z0-9_-]{0,23}$' "
     "      GROUP BY s.city, s.district) g "
-    "WHERE NOT EXISTS (SELECT 1 FROM district_area b WHERE b.city = g.city AND b.district = g.district AND b.source = 'builtin') "
+    "WHERE NOT EXISTS (SELECT 1 FROM district_area b WHERE b.city = g.city AND b.district = g.district AND b.source IN ('builtin', 'boundary')) "
     "ON CONFLICT (city, district) DO UPDATE SET geom = EXCLUDED.geom "
     "WHERE district_area.source = 'derived' AND NOT ST_OrderingEquals(district_area.geom, EXCLUDED.geom)")
 # Derived rows whose district has no located sensor any more (deleted city or sensors). Built-in rows are never removed.
@@ -257,6 +277,7 @@ def ensure(conn) -> dict:
                 conn.execute(stmt)
             with conn.cursor() as cur:
                 cur.executemany(UPSERT_AREA, [(c, d, w, BUILTIN, BUILTIN) for c, d, w in builtin_areas()])
+                cur.executemany(UPSERT_BOUNDARY, boundaries.boundary_areas())
         except psycopg.Error as exc:
             reason = f"geography schema could not be set up: {str(exc).splitlines()[0][:120]}"
             log.warning(reason)
@@ -328,7 +349,9 @@ def districts_geojson(conn, city: str | None = None) -> dict:
                            "counts": {k: r[k] for k in ("ok", *SEVERITY)}, "reported_elsewhere": r["reported_elsewhere"]}})
     without = conn.execute("SELECT count(*) AS n FROM sensor WHERE geom IS NULL AND (%(city)s::text IS NULL OR city = %(city)s)",
                            {"city": city}).fetchone()["n"]
-    return {"available": True, "type": "FeatureCollection", "city": city, "features": features, "sensors_without_location": without}
+    info = boundaries.meta().get(city) if city else None
+    return {"available": True, "type": "FeatureCollection", "city": city, "features": features, "sensors_without_location": without,
+            "attribution": info["attribution"] if info and any(f["properties"]["source"] == BOUNDARY for f in features) else None}
 
 
 def sensors_geojson(conn, city: str | None, state: str, limit: int) -> dict:

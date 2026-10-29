@@ -12,3 +12,4 @@ dist/
 *.pem
 docs/video/out/
 docs/video/node_modules/
+build/

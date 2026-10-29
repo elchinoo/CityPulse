@@ -73,3 +73,7 @@ On the take the verdict was degraded 31 s after the burst press and the PagerLen
 ## 4. Recording notes
 
 See [video/README.md](video/README.md). The local scenes are labelled by a green badge ("RUNNING LOCALLY ..."), the captured ones by the orange banner. Rehearse with `RECORD_WARMUP_S=60 HOLD=0.6 npx playwright test` in `docs/video` (a rehearsal is not the final timing). Companion document: [GUIDE.md](GUIDE.md).
+
+## 5. Status of the map capture
+
+Scene 2's captured Map (`citypulse-map-gotham-2026-10-28.jpg`) shows the old invented city **gotham** with outlines derived from the sensors' positions. That is what the live fleet showed on 28 Oct 2026 and the narration stays true for it. Since then the Map draws real boundaries and a base map for Brussels and Vienna ([guide 7.8](GUIDE.md#78-map-tab-postgis)): when the fleet runs the new images, recapture the Map of the `brussels` city (solid outlines, canal and parks, district names, the attribution line) and adapt the on-screen action of scene 2 (the dashed-outline legend box becomes the solid "real district boundary" entry). The video has not been re-recorded.

@@ -28,7 +28,7 @@ and the [list of EDB and AgentPG capabilities this app uses](docs/GUIDE.md#edb-a
   meters, street lights, gas leaks, waste bins, bridge vibration, seismic, pedestrians, bike-share, EV chargers and
   parking bays. See `src/citypulse/catalog.py`.
 * **A map** (PostGIS): district polygons coloured by health and the sensors, drawn as inline SVG; `GET /api/sensors/nearby`
-  and `GET /api/districts/geojson`. Readings may carry optional `lat` and `lon`. Cities without built-in polygons get district areas derived from their sensors' positions (`ST_ConvexHull`, `ST_Collect`, `ST_Buffer`, with `ST_Contains` and `ST_DWithin` for the rest), marked `derived` on the map. Without PostGIS the map says so and nothing else changes.
+  and `GET /api/districts/geojson`. Readings may carry optional `lat` and `lon`. Brussels and Vienna come with their **real district boundaries** and a light base map (water, parks, main roads; OpenStreetMap and Stadt Wien open data, attribution on the map, no network at run time: [guide 7.8](docs/GUIDE.md#78-map-tab-postgis)); other cities without built-in polygons get district areas derived from their sensors' positions (`ST_ConvexHull`, `ST_Collect`, `ST_Buffer`, with `ST_Contains` and `ST_DWithin` for the rest), marked `derived` on the map. Without PostGIS the map says so and nothing else changes.
 * **Five data models in one Postgres** ([guide 7.11](docs/GUIDE.md#711-one-engine-five-data-models)): relational state, **JSON** device
   metadata (`sensor.attrs`, GIN `jsonb_path_ops`, `GET /api/sensors?attrs={"vendor":"Aerolab"}` and a jsonpath filter),
   **time series** on core Postgres (BRIN, `date_bin` roll-ups per district at 5 minutes and 1 hour, monthly partitions, `GET /api/districts/{id}/series`),

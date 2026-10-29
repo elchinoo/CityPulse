@@ -23,11 +23,23 @@ const DISTRICTS = { available: true, type: "FeatureCollection", city: "paris", s
 const point = (id, status, lon, lat) => ({ type: "Feature", id, geometry: { type: "Point", coordinates: [lon, lat] }, properties: { id, type: "temperature", district: "d01", city: "paris", status, reason: null } });
 const SENSORS = { available: true, type: "FeatureCollection", city: "paris", state: "problem", matching: 30, features: [point("paris.a", "offline", 2.305, 48.845), point("paris.b", "fault", 2.325, 48.842)] };
 
-let off = false;
+let off = false, ctxMode = "ok";
 const urls = [];
+const CONTEXT = { type: "FeatureCollection", city: "brussels", attribution: "© OpenStreetMap contributors (ODbL)", features: [
+  { type: "Feature", properties: { kind: "water" }, geometry: { type: "Polygon", coordinates: [[[4.31, 50.84], [4.32, 50.84], [4.32, 50.85], [4.31, 50.85], [4.31, 50.84]]] } },
+  { type: "Feature", properties: { kind: "park" }, geometry: { type: "Polygon", coordinates: [[[4.34, 50.84], [4.35, 50.84], [4.35, 50.85], [4.34, 50.85], [4.34, 50.84]]] } },
+  { type: "Feature", properties: { kind: "waterway" }, geometry: { type: "LineString", coordinates: [[4.30, 50.83], [4.33, 50.86]] } },
+  { type: "Feature", properties: { kind: "road_main" }, geometry: { type: "MultiLineString", coordinates: [[[4.30, 50.84], [4.36, 50.84]], [[4.30, 50.85], [4.36, 50.85]]] } },
+  { type: "Feature", properties: { kind: "road_major" }, geometry: { type: "LineString", coordinates: [[4.33, 50.83], [4.33, 50.86]] } },
+  { type: "Feature", properties: { kind: "castle" }, geometry: { type: "LineString", coordinates: [[0, 0], [1, 1]] } }] };
+let boundary = false;
 globalThis.fetch = async (url) => {
   const u = String(url);
   urls.push(u);
+  if (u.startsWith("/api/geo/context")) {
+    if (ctxMode === "fail") return { ok: false, status: 500, json: async () => ({ detail: "boom" }) };
+    return { ok: true, status: 200, json: async () => (boundary ? CONTEXT : {}) };
+  }
   const body = off ? { available: false, type: "FeatureCollection", features: [], reason: "PostGIS is not available on this database" }
     : u.startsWith("/api/districts/geojson") ? DISTRICTS : u.startsWith("/api/sensors/geojson") ? SENSORS : {};
   return { ok: true, status: 200, json: async () => body };
@@ -36,7 +48,7 @@ globalThis.fetch = async (url) => {
 const { state } = await import("/kit/session.js");
 state.session = { state: "logged_in", user: { permissions: ["*"] } };
 const { setCity } = await import("/static/cities.js");
-const { initMap, stopMap, healthClass, makeProjection, drawMap, districtLink } = await import("/static/map.js");
+const { initMap, stopMap, healthClass, makeProjection, drawMap, districtLink, resetContexts, widestPoint, placeLabels, contextLayer, UNDER, OVER } = await import("/static/map.js");
 const cls = (e) => e.attrs.class ?? e.className ?? "";
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
@@ -135,7 +147,98 @@ assert.ok(box.textContent.includes("Map not available") && box.textContent.inclu
 assert.ok(!box.all().some((e) => e.tag === "svg"));
 stopMap();
 
-// 4. the polygons without sensors and no sensors at all: still drawn; a city with nothing says so
+// 4. real boundaries and a base map (Brussels): outlines marked as real, base layers under and over the districts, names on top, attribution
+const bsq = (x, y, w = 0.02, h = 0.012) => ({ type: "Polygon", coordinates: [[[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]] });
+const bfeat = (district, name, health, total, geometry) => ({ type: "Feature", id: `brussels/${district}`, geometry, properties: { city: "brussels", district, name, source: "boundary",
+  total, ok: Math.round((health ?? 0) * total), health, worst_status: "ok", counts: {}, reported_elsewhere: 0 } });
+off = false;
+SENSORS.features = [point("brussels.a", "offline", 4.37, 50.825), point("brussels.b", "fault", 4.31, 50.845)];
+DISTRICTS.city = "brussels";
+DISTRICTS.attribution = "© OpenStreetMap contributors (ODbL)";
+DISTRICTS.features = [bfeat("ixelles", "Ixelles", 0.9, 20, bsq(4.36, 50.82)), bfeat("molenbeek-saint-jean", "Molenbeek-Saint-Jean", 1, 12, bsq(4.30, 50.84)),
+  bfeat("koekelberg", "Koekelberg", 0.5, 4, bsq(4.33, 50.86, 0.004, 0.003)), bfeat("saint-gilles", "Saint-Gilles", null, 0, bsq(4.33, 50.83))];
+boundary = true;
+const ctxBefore = urls.filter((u) => u.startsWith("/api/geo/context")).length;
+setCity("brussels");
+await initMap();
+await settle();
+const b = box.all();
+const bsvg = b.find((e) => e.tag === "svg");
+for (const e of b) assert.ok(!("style" in e.attrs), `no inline style attribute on <${e.tag}> (real boundaries)`);
+assert.ok(urls.filter((u) => u.startsWith("/api/geo/context?city=brussels")).length === 1 && urls.filter((u) => u.startsWith("/api/geo/context")).length === ctxBefore + 1, "one context request for the city");
+const kids = bsvg.children.map((c) => cls(c).split(" ").slice(0, 2).join(" "));
+assert.deepEqual(kids, ["base-map base-under", "districts", "base-map base-over", "sensors", "area-names"], "park tint, districts, water and roads, dots, names last");
+const classes = bsvg.all().filter((e) => e.tag === "path" && /(^| )base( |$)/.test(cls(e))).map((e) => cls(e).split(" ")[1]);
+assert.deepEqual(classes, ["base-park", "base-water", "base-waterway", "base-road_main", "base-road_major"], "one path per kind, unknown kinds ignored");
+assert.ok(bsvg.children.filter((c) => /base-map/.test(cls(c))).every((c) => c.attrs["aria-hidden"] === "true"), "the base map is decoration");
+assert.ok(bsvg.all().filter((e) => e.tag === "g" && /district /.test(cls(e) + " ")).every((g) => /(^| )boundary( |$)/.test(cls(g)) && !/derived/.test(cls(g))), "real boundaries are marked");
+const btext = box.textContent;
+assert.ok(btext.includes("solid outline: real district boundary") && !btext.includes("outline derived from sensor positions") && !btext.includes("simulated outline"), "legend names the sources that are on the map");
+assert.ok(btext.includes("Map data: © OpenStreetMap contributors (ODbL)"), "attribution under the map");
+assert.ok(btext.includes("water") && btext.includes("main roads"), "legend explains the base map");
+const named = bsvg.all().filter((e) => e.tag === "text" && cls(e) === "area-name");
+assert.ok(named.length >= 3, "names are drawn");
+assert.ok(named.every((t) => t.attrs.x != null && t.attrs.y != null && !("style" in t.attrs)));
+// a second render does not ask again
+for (const fn of [...timers.values()]) await fn();
+await settle();
+assert.equal(urls.filter((u) => u.startsWith("/api/geo/context")).length, ctxBefore + 1, "context is fetched once per city");
+stopMap();
+
+// the base map failing to load is not an error: the map is drawn, the attribution of the districts is shown
+ctxMode = "fail";
+resetContexts();
+await initMap();
+await settle();
+assert.ok(box.all().some((e) => e.tag === "svg") && !box.all().some((e) => e.tag === "path" && /base-/.test(cls(e))), "no base map, still a map");
+assert.ok(box.textContent.includes("Map data: © OpenStreetMap contributors (ODbL)"), "attribution still comes with the districts");
+stopMap();
+ctxMode = "ok";
+
+// 5. names: widest point, no overlaps, away from sensors, tiny districts left out
+const L = [[0, 0], [100, 0], [100, 20], [20, 20], [20, 100], [0, 100], [0, 0]];                // an L: the centroid (about 38, 38) is outside it
+const [lx, ly] = widestPoint(L);
+const inL = (x, y) => (x >= 0 && x <= 100 && y >= 0 && y <= 20) || (x >= 0 && x <= 20 && y >= 0 && y <= 100);
+assert.ok(inL(lx, ly), `the widest point of an L is inside it (${lx}, ${ly})`);
+const [sx, sy] = widestPoint([[0, 0], [60, 0], [60, 60], [0, 60], [0, 0]]);
+assert.ok(Math.abs(sx - 30) < 8 && Math.abs(sy - 30) < 8, "and at the middle of a square");
+const rect = (x, y, w, hgt) => [[x, y], [x + w, y], [x + w, y + hgt], [x, y + hgt], [x, y]];
+const cands = [
+  { key: "big", text: "Molenbeek-Saint-Jean", ring: rect(10, 10, 300, 120), area: 36000 },
+  { key: "mid", text: "Ixelles", ring: rect(320, 10, 120, 80), area: 9600 },
+  { key: "tiny", text: "Saint-Josse-ten-Noode", ring: rect(445, 10, 14, 10), area: 140 },
+  { key: "next", text: "Koekelberg", ring: rect(10, 140, 100, 40), area: 4000 }];
+const bounds = { width: 800, height: 400 };
+const placed = placeLabels(cands, [], bounds);
+const keys = placed.map((p) => p.key);
+assert.ok(keys.includes("big") && keys.includes("mid") && keys.includes("next"), keys.join());
+for (let i = 0; i < placed.length; i++) {
+  const a = placed[i].box;
+  assert.ok(a.x0 >= 0 && a.y0 >= 0 && a.x1 <= bounds.width && a.y1 <= bounds.height, "inside the map");
+  for (let j = i + 1; j < placed.length; j++) {
+    const c = placed[j].box;
+    assert.ok(!(a.x0 < c.x1 && a.x1 > c.x0 && a.y0 < c.y1 && a.y1 > c.y0), `${placed[i].key} and ${placed[j].key} do not overlap`);
+  }
+}
+assert.ok(placed.every((p) => p.lines.length >= 1 && p.lines.every((l) => l.text && Number.isFinite(l.x) && Number.isFinite(l.y))));
+assert.deepEqual(placeLabels(cands, [], bounds).map((p) => p.key), keys, "deterministic");
+// dots under the default spot push the name aside
+const [bx, by] = widestPoint(cands[0].ring);
+const cluster = [];
+for (let i = -30; i <= 30; i += 6) for (let j = -4; j <= 4; j += 4) cluster.push([bx + i, by + j]);
+const moved = placeLabels([cands[0]], cluster, bounds)[0];
+const hiddenBy = (p, dots) => dots.filter(([x, y]) => x >= p.box.x0 && x <= p.box.x1 && y >= p.box.y0 && y <= p.box.y1).length;
+assert.ok(hiddenBy(moved, cluster) < hiddenBy(placeLabels([cands[0]], [], bounds)[0], cluster), "the name moves off the sensors when it can");
+// a long name that does not fit in one line is split at a hyphen
+const narrow = placeLabels([{ key: "n", text: "Berchem-Sainte-Agathe", ring: rect(0, 0, 90, 50), area: 4500 }], [], { width: 200, height: 100 });
+assert.equal(narrow.length, 1);
+assert.equal(narrow[0].lines.length, 2, "two lines");
+assert.equal(placeLabels([{ key: "z", text: "Nowhere", ring: rect(0, 0, 5, 5), area: 25 }], [], { width: 4, height: 4 }).length, 0, "no room: no name");
+// base layers: unknown kinds and empty input
+assert.equal(contextLayer({ features: [] }, makeProjection([[[0, 0], [1, 1]]], []), OVER), null);
+assert.equal(contextLayer(null, null, UNDER), null);
+
+// 6. the polygons without sensors and no sensors at all: still drawn; a city with nothing says so
 const empty = drawMap({ features: [] }, { features: [] });
 assert.ok(empty.textContent.includes("Nothing to draw"));
 console.log("ok");

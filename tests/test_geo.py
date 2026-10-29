@@ -219,7 +219,7 @@ def test_derived_area_sql_is_minimal_and_never_touches_builtin_rows():
     sql = geo.REFRESH_DERIVED
     for fn in ("ST_ConvexHull", "ST_Collect", "ST_Buffer", "ST_OrderingEquals"):
         assert fn in sql
-    assert "source = 'builtin'" in sql and "NOT EXISTS" in sql, "a district with a built-in polygon is never derived"
+    assert "b.source IN ('builtin', 'boundary')" in sql and "NOT EXISTS" in sql, "a district with a built-in or real polygon is never derived"
     assert "district_area.source = 'derived'" in sql, "only derived rows are updated"
     assert "builtin" not in geo.PRUNE_DERIVED and "source = 'derived'" in geo.PRUNE_DERIVED
     assert "a.source <> 'derived' AND ST_Contains" in geo.AREAS_SQL and "a.source = 'derived' AND a.district = s.district" in geo.AREAS_SQL

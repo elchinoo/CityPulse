@@ -78,7 +78,7 @@ main.wide { max-width: 78rem; }
 .heat td button { width: 1.45rem; height: 1.45rem; padding: 0; border-radius: 4px; border: 0; background: var(--cell-off); }
 .heat td button.h0 { background: var(--bad); } .heat td button.h1 { background: #ea580c; } .heat td button.h2 { background: var(--amber); }
 .heat td button.h3 { background: #84cc16; } .heat td button.h4 { background: var(--good); } .heat td button.none { background: transparent; cursor: default; }
-.legend { display: flex; gap: .4rem; align-items: center; color: var(--muted); font-size: .8rem; margin-top: .5rem; }
+.legend { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; color: var(--muted); font-size: .8rem; margin-top: .5rem; }
 .legend i { width: .9rem; height: .9rem; border-radius: 3px; display: inline-block; }
 .bar { height: .5rem; border-radius: 4px; background: var(--cell-off); overflow: hidden; min-width: 6rem; }
 .bar > i { display: block; height: 100%; background: var(--good); }
@@ -135,7 +135,23 @@ button.burst:hover { filter: brightness(1.08); }
 .heat-key.derived { background: transparent; border: 1.5px dashed var(--text); box-sizing: border-box; }
 .map-svg .district:hover .area { fill-opacity: 1; }
 .map-svg .district:focus-visible .area { stroke: var(--text); stroke-width: 3; fill-opacity: 1; }
-.map-svg .area-name { fill: var(--text); font-size: 11px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; pointer-events: none; }
+.map-svg .district.boundary .area { stroke: color-mix(in srgb, var(--text) 75%, transparent); stroke-width: 1.2; stroke-linejoin: round; fill-opacity: .55; }
+.map-svg .district.boundary:hover .area { fill-opacity: .85; }
+.map-svg .district.boundary:focus-visible .area { stroke: var(--text); stroke-width: 3; fill-opacity: .85; }
+.heat-key.boundary { background: transparent; border: 1.5px solid var(--text); box-sizing: border-box; }
+.heat-key.builtin { background: transparent; border: 1px solid var(--muted); box-sizing: border-box; }
+/* Base map: light tints mixed into the page background, so they follow the light and dark themes. */
+.map-svg .base { fill: none; stroke: none; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.map-svg .base-park { fill: color-mix(in srgb, #16a34a 42%, var(--bg)); }
+.map-svg .base-water { fill: color-mix(in srgb, #60a5fa 70%, var(--bg)); stroke: color-mix(in srgb, #2563eb 55%, var(--bg)); stroke-width: .6; fill-rule: evenodd; }
+.map-svg .base-waterway { stroke: color-mix(in srgb, #60a5fa 70%, var(--bg)); stroke-width: 2.4; }
+.map-svg .base-road_main { stroke: color-mix(in srgb, var(--surface) 70%, transparent); stroke-width: 1; }
+.map-svg .base-road_major { stroke: color-mix(in srgb, var(--surface) 90%, transparent); stroke-width: 2.4; }
+.heat-key.base-water { background: color-mix(in srgb, #60a5fa 70%, var(--bg)); margin-left: .3rem; }
+.heat-key.base-park { background: color-mix(in srgb, #16a34a 42%, var(--bg)); margin-left: .3rem; }
+.heat-key.base-road { background: var(--surface); border: 1px solid var(--line); height: .35rem; margin-left: .3rem; }
+.map-attrib { font-size: .75rem; margin: .25rem 0 0; }
+.map-svg .area-name { fill: var(--text); font-size: 11px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 3.5px; stroke-linejoin: round; pointer-events: none; }
 .map-svg .pt { stroke: var(--surface); stroke-width: 1; fill: var(--good); }
 .map-svg .pt.st-stale { fill: var(--amber); } .map-svg .pt.st-offline { fill: var(--off); } .map-svg .pt.st-fault { fill: var(--bad); } .map-svg .pt.st-stuck { fill: #9333ea; }
 .heat-key.none { background: var(--cell-off); }
