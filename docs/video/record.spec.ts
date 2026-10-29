@@ -7,10 +7,12 @@
  *    sensor detail, the Map tab saying PostGIS is missing, the Explain tab (relational, time series and JSON answer; geo and
  *    vector say why not) and its SQL, a new vendor's batch (JSON attributes + position), the JSONB query, the burst, the verdict
  *    falling, the alert hand-off to PagerLens, the Insights tab saying "not available", the read-only database user.
- *  - CAPTURED from the live AgentPG fleet, 28 Oct 2026 (videos/live-captures/, shown as stills with a slow zoom and highlight boxes,
- *    under a banner): the Map of the gotham fleet (PostGIS), the Explain card with all five models, PayBroker's Insights tab (same
- *    kit, same fleet), the extension list and the `ecoctl insights` advice for CityPulse's own database.
- *  - NOT RUN ANYWHERE IN THIS VIDEO: the ST_DWithin query (shown as source text, labelled), HA/failover, AIDB.
+ *  - CAPTURED from the live AgentPG fleet, 28 and 29 Oct 2026 (videos/live-captures/, shown as stills with a slow zoom and highlight boxes,
+ *    under a banner): from 29 Oct 2026 the Map of Brussels (real communes, OpenStreetMap) and the Explain card for Ixelles (five models,
+ *    the geo part with distances in metres); from 28 Oct 2026 the vector part of an earlier Explain card (three similar past episodes,
+ *    labelled with its own date), PayBroker's Insights tab (same kit, same fleet), the extension list and the `ecoctl insights` advice
+ *    for CityPulse's own database.
+ *  - NOT SHOWN IN THIS VIDEO: HA/failover, AIDB.
  *  A local Postgres has no PostGIS and no edb_* extensions (checked: `CREATE EXTENSION postgis` fails here), so those parts are
  *  never faked. CityPulse has no AI model, so there is no stand-in model in this video.
  *
@@ -210,8 +212,9 @@ h2{margin:6px 0 4px;font-size:44px}p{margin:0;font-size:30px;line-height:1.35}
 .row{display:flex;gap:22px}.chip{flex:1;border:3px dashed #6b7787;border-radius:12px;padding:14px 18px;font-size:30px;text-align:center;background:#fafbfc}
 .ext{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}.ext span{background:#0b5cad;color:#fff;border-radius:10px;padding:6px 16px;font:600 28px ui-monospace,Menlo,monospace;transition:all .5s}
 .arrow{text-align:center;font-size:36px;color:#6b7787;margin:-12px 0}
-.dim{opacity:.35}.hl{box-shadow:0 0 0 10px rgba(255,159,28,.45);transform:scale(1.01)}.ext span.hot{background:#ff9f1c;color:#111;outline:6px solid rgba(255,159,28,.4)}
+.dim{opacity:.35}#tpl{position:absolute;top:6px;right:90px;background:#e07b00;color:#fff;font:800 30px system-ui;padding:8px 24px;border-radius:999px;opacity:0;transition:opacity .6s}#tpl.on{opacity:1}.hl{box-shadow:0 0 0 10px rgba(255,159,28,.45);transform:scale(1.01)}.ext span.hot{background:#ff9f1c;color:#111;outline:6px solid rgba(255,159,28,.4)}
 </style>
+<div id="tpl">Templates, not only demos: Apache 2.0, take it, adapt it, run it</div>
 <div class="w">
  <div class="box app" id="app"><span class="tag">Sample app</span><h2>CityPulse and its simulator</h2><p>Sensors, status, bursts, one question per district. It exists to show the platform.</p></div>
  <div class="arrow">&#8595;</div>
@@ -255,6 +258,8 @@ async function typeLine(page: Page, current: string, prompt: string, cmd: string
 
 /** Real captures from the live AgentPG fleet (videos/live-captures/), shown with a slow zoom and a highlight box. */
 const LIVE_DIR = path.resolve(__dirname, '..', '..', '..', 'videos', 'live-captures');
+const CAPTURED = 'CAPTURED from the live AgentPG fleet, 28 Oct 2026';
+const CAPTURED29 = 'CAPTURED from the live AgentPG fleet, 29 Oct 2026';
 const IW = 1481, IH = 812; // the screenshots' size; boxes are read off them in pixels
 const STILL_HTML = `<style>
 html,body{margin:0;height:100%;background:#0b1220;overflow:hidden;font-family:system-ui,sans-serif}
@@ -262,15 +267,15 @@ html,body{margin:0;height:100%;background:#0b1220;overflow:hidden;font-family:sy
 .tg{padding:6px 20px;border-radius:10px;color:#0b1220}.cap{background:#fb923c;box-shadow:0 0 0 4px rgba(251,146,60,.35)}.pl{background:#38bdf8}
 #stage{position:absolute;left:48px;top:80px;width:1824px;height:1000px;overflow:hidden;background:#fff}
 #w{position:absolute;inset:0;transform-origin:50% 50%}#w img{width:100%;height:100%;display:block}
-#box{position:absolute;border:6px solid #f59e0b;border-radius:8px;box-shadow:0 0 0 9999px rgba(11,18,32,.28);opacity:0;transition:opacity .4s}
-</style><div id="bar"><span class="tg cap">CAPTURED from the live AgentPG fleet, 28 Oct 2026</span><span class="tg pl" id="tag2"></span></div>
+#box{position:absolute;border:6px solid #f59e0b;border-radius:8px;opacity:0;transition:opacity .4s}
+</style><div id="bar"><span class="tg cap" id="tag1"></span><span class="tg pl" id="tag2"></span></div>
 <div id="stage"><div id="w"><img id="img"><div id="box"></div></div></div>`;
-async function stillPage(page: Page, tag: string, files: string[]) {
+async function stillPage(page: Page, tag: string, files: string[], banner = CAPTURED) {
   await blank(page);
   await page.setContent(STILL_HTML);
   const srcs: Record<string, string> = {};
   for (const f of files) srcs[f] = 'data:image/jpeg;base64,' + fs.readFileSync(path.join(LIVE_DIR, f)).toString('base64');
-  await page.evaluate(([t, m]) => { document.getElementById('tag2')!.textContent = t as string; (window as any).__srcs = m; }, [tag, srcs] as const);
+  await page.evaluate(([t, m, b]) => { document.getElementById('tag2')!.textContent = t as string; document.getElementById('tag1')!.textContent = b as string; (window as any).__srcs = m; }, [tag, srcs, banner] as const);
 }
 const pct = (x0: number, y0: number, x1: number, y1: number) => [(x0 / IW) * 100, (y0 / IH) * 100, ((x1 - x0) / IW) * 100, ((y1 - y0) / IH) * 100];
 /** a shot: which capture, zoom origin (% of the image), zoom from/to over ms, highlight box (pixels of the capture: x0, y0, x1, y1). */
@@ -284,7 +289,9 @@ const shot = (page: Page, img: string, ox: number, oy: number, z0: number, z1: n
     w.style.transition = `transform ${(e as number) * 1}ms linear`; w.style.transform = `scale(${d})`;
     if (f) { const g = f as number[]; bx.style.left = g[0] + '%'; bx.style.top = g[1] + '%'; bx.style.width = g[2] + '%'; bx.style.height = g[3] + '%'; bx.style.opacity = '1'; } else bx.style.opacity = '0';
   }, [img, ox, oy, z0, z1, ms * HOLD, box ? pct(box[0], box[1], box[2], box[3]) : null] as const);
-const MAP = 'citypulse-map-gotham-2026-10-28.jpg', EXTOP = 'citypulse-explain-top-2026-10-28.jpg', EXGV = 'citypulse-explain-geo-vector-2026-10-28.jpg';
+const MAP = 'citypulse-map-brussels-2026-10-29.jpg', EXTOP = 'citypulse-explain-top-brussels-2026-10-29.jpg', EXGEO = 'citypulse-explain-geo-brussels-2026-10-29.jpg';
+const EXGV = 'citypulse-explain-geo-vector-2026-10-28.jpg'; // 28 Oct: used for the vector part only, under its own date
+const setBanner = (page: Page, text: string, tag: string) => page.evaluate(([b, t]) => { document.getElementById('tag1')!.textContent = b; document.getElementById('tag2')!.textContent = t; }, [text, tag] as const);
 const TOPQ = 'paybroker-insights-top-queries-2026-10-28.jpg', TUNE = 'paybroker-insights-tuner-advisor-2026-10-28.jpg';
 
 /** A captured text (real command output saved from the live fleet) or source text, drawn as a card under the same banner. */
@@ -303,7 +310,6 @@ const textCard = async (page: Page, banner: string, tag: string, title: string, 
 };
 const hotLines = (page: Page, ids: number[]) =>
   page.evaluate((a) => document.querySelectorAll('.l').forEach((e, i) => e.classList.toggle('hot', a.includes(i))), ids);
-const CAPTURED = 'CAPTURED from the live AgentPG fleet, 28 Oct 2026';
 
 /** One section of a capture file: the lines after the header that contains `key` up to the next blank line / next header. */
 function section(file: string, key: string): string[] {
@@ -383,6 +389,8 @@ test('CityPulse: time series, JSON, geo and vectors in one Postgres', async ({ p
   });
   await at(page, 'One database, doing all of it', 0.2);
   await page.evaluate(() => document.querySelectorAll('.ext span').forEach((e, i) => { if (i < 4) e.classList.add('hot'); }));
+  await at(page, 'These apps are templates', 0.2);
+  await show(page, 'tpl');
   await endScene(page);
 
   // ---- Scene 2: the map. Local: a sensor with its position; the Map tab without PostGIS. Captured: the real map; the SQL ----------
@@ -405,30 +413,35 @@ test('CityPulse: time series, JSON, geo and vectors in one Postgres', async ({ p
   await callout(page, 'Local Postgres: no PostGIS, so no map', '#view-map .card', 0, 4.5);
   await at(page, 'This is the live fleet instead', 0.3);
   await badge(page, '');
-  await stillPage(page, 'Map tab, a simulated city called gotham', [MAP]);
-  await shot(page, MAP, 50, 40, 1.0, 1.06, 6500);
-  await at(page, 'Their outlines are derived', 0.2);
-  await shot(page, MAP, 50, 45, 1.0, 1.15, 5500, [243, 706, 1012, 728]);
+  await stillPage(page, 'Map tab: Brussels', [MAP, EXGEO], CAPTURED29);
+  await shot(page, MAP, 50, 45, 1.0, 1.08, 3200);
+  await at(page, 'This is Brussels', 0.2);
+  await shot(page, MAP, 50, 45, 1.04, 1.14, 5200, [460, 140, 1010, 690]);
+  await at(page, 'The sensors are simulated', 0.2);
+  await shot(page, MAP, 22, 95, 1.0, 1.9, 1900, [243, 770, 475, 788]);
+  await at(page, 'The base map has the water', 0.2);
+  await shot(page, MAP, 56, 30, 1.5, 1.7, 2200, [700, 145, 860, 330]);
+  await at(page, 'The parks', 0.2);
+  await shot(page, MAP, 62, 75, 1.5, 1.6, 1100, [745, 500, 1010, 660]);
+  await at(page, 'And the communes', 0.2);
+  await shot(page, MAP, 50, 45, 1.2, 1.3, 2000, [460, 140, 1010, 690]);
   await at(page, 'The colour is the health', 0.2);
-  await shot(page, MAP, 50, 45, 1.1, 1.2, 5000, [368, 143, 1102, 692]);
-  await at(page, 'The brown district', 0.2);
-  await shot(page, MAP, 30, 80, 1.5, 1.9, 5000, [369, 526, 533, 691]);
-  await at(page, 'And you can ask what is near a point', 0.3);
-  const GEO_SQL = [
-    '-- CityPulse src/citypulse/geo.py: nearby(), the query behind GET /api/sensors/nearby',
-    '-- (source text. PostGIS is on the live fleet, not on this laptop: not run in this video)',
-    'WITH p AS (SELECT ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography AS g)',
-    'SELECT s.id, s.type, s.district, s.status,',
-    '       round(ST_Distance(s.geom, p.g)::numeric, 1) AS distance_m',
-    'FROM sensor s, p',
-    'WHERE s.geom IS NOT NULL AND ST_DWithin(s.geom, p.g, :radius_m)   -- metres, GiST index',
-    'ORDER BY ST_Distance(s.geom, p.g), s.id LIMIT :limit',
-  ];
-  await textCard(page, 'SOURCE TEXT, not run in this video', 'geography column + GiST index', 'Nearby sensors, in metres', GEO_SQL);
+  await shot(page, MAP, 40, 100, 1.0, 1.4, 2400, [243, 708, 1130, 728]);
+  await at(page, 'Two communes stand out', 0.2);
+  await shot(page, MAP, 45, 45, 1.5, 1.6, 1500, [600, 310, 682, 360]);
   await pause(page, 1.5);
-  await hotLines(page, [6]);
-  await at(page, 'One within-distance function', 0.2);
-  await hotLines(page, [6, 4]);
+  await shot(page, MAP, 62, 60, 1.5, 1.6, 1500, [808, 462, 1012, 600]);
+  await at(page, 'The simulator places each sensor', 0.2);
+  await shot(page, MAP, 50, 45, 1.0, 1.12, 6000);
+  await at(page, 'So you can ask what is near a point', 0.3);
+  await setBanner(page, CAPTURED29, 'Explain tab for Ixelles (brussels): the geo part');
+  await shot(page, EXGEO, 40, 55, 1.0, 1.15, 2500);
+  await at(page, 'The nearest healthy sensors', 0.2);
+  await shot(page, EXGEO, 40, 60, 1.15, 1.3, 7000, [251, 538, 1215, 578]);
+  await at(page, 'The neighbouring communes are', 0.2);
+  await shot(page, EXGEO, 40, 62, 1.3, 1.35, 5500, [251, 590, 1000, 612]);
+  await at(page, 'PostGIS answers', 0.2);
+  await shot(page, EXGEO, 40, 55, 1.2, 1.1, 3000, [251, 472, 1219, 612]);
   await endScene(page);
 
   // ---- Scene 3: Explain, one statement, five models --------------------------------------------------------------------------
@@ -465,14 +478,17 @@ test('CityPulse: time series, JSON, geo and vectors in one Postgres', async ({ p
   await page.evaluate(() => { const p = document.querySelector('details.sqlview pre') as HTMLElement; p.scrollTo({ top: p.scrollHeight, behavior: 'smooth' }); });
   await at(page, 'Here is the same card on the live fleet', 0.3);
   await badge(page, '');
-  await stillPage(page, 'Explain tab, gotham: five models, one statement', [EXTOP, EXGV]);
-  await shot(page, EXTOP, 50, 30, 1.0, 1.07, 6000, [251, 296, 1219, 320]);
-  await at(page, 'Geo: the nearest', 0.2);
-  await shot(page, EXGV, 40, 60, 1.0, 1.25, 5500, [251, 450, 1180, 490]);
-  await pause(page, 3.4);
-  await shot(page, EXGV, 40, 62, 1.25, 1.35, 3500, [251, 503, 955, 523]);
+  await stillPage(page, 'Explain tab for Ixelles (brussels): five models, one statement', [EXTOP, EXGEO], CAPTURED29);
+  await shot(page, EXTOP, 50, 30, 1.0, 1.08, 3600);
+  await at(page, 'Five data models', 0.2);
+  await shot(page, EXTOP, 30, 35, 1.1, 1.25, 3000, [251, 298, 720, 320]);
+  await at(page, 'Geo: the centre', 0.2);
+  await shot(page, EXGEO, 40, 60, 1.0, 1.3, 5200, [251, 472, 1219, 612]);
   await at(page, 'Vector: three', 0.2);
-  await shot(page, EXGV, 40, 80, 1.1, 1.3, 7000, [251, 545, 1219, 700]);
+  await setBanner(page, CAPTURED, 'Explain tab, vector part: an earlier capture, 28 Oct');
+  await shot(page, EXGV, 40, 88, 1.25, 1.45, 3400, [251, 545, 1219, 700]);
+  await at(page, 'That part is from the capture', 0.2);
+  await shot(page, EXGV, 40, 88, 1.45, 1.55, 6000, [251, 545, 1219, 700]);
   await endScene(page);
 
   // ---- Scene 4: live data, a new vendor, the burst, the verdict --------------------------------------------------------------
@@ -690,7 +706,7 @@ test('CityPulse: time series, JSON, geo and vectors in one Postgres', async ({ p
     <p class="b x dim" id="b4" style="font-size:56px">four databases to keep in sync</p>
     <p class="b dim" id="b5" style="font-size:64px">docker compose up</p>
     <p class="s dim" id="b6">docs/GUIDE.md</p>
-    <p class="dim" id="b7"><span class="tag a">RAN LOCALLY: this laptop</span><span class="tag f">CAPTURED: live AgentPG fleet, 28 Oct 2026</span></p></div>`);
+    <p class="dim" id="b7"><span class="tag a">RAN LOCALLY: this laptop</span><span class="tag f">CAPTURED: live AgentPG fleet, 28 and 29 Oct 2026</span></p></div>`);
   await at(page, 'So, look how much easier', 0.1);
   await show(page, 'b1');
   await at(page, 'Time series, JSON, geography', 0.2);

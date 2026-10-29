@@ -7,16 +7,22 @@ This is CityPulse, a sample app, with its simulator. The identity provider, the 
 
 What you are watching is EDB Postgres on the AgentPG platform. One database, doing all of it.
 
+These apps are templates, not only demos. CityPulse is Apache 2.0. Take it, adapt it, and run it.
+
 ## 2 af_heart
 First, where things are. Every sensor reports a latitude and a longitude. Here is one, with its position.
 
 On this laptop there is no PostGIS. So the Map tab says it is not available.
 
-This is the live fleet instead, captured. PostGIS draws the districts. Their outlines are derived from the sensor positions.
+This is the live fleet instead, captured. And the city is real. This is Brussels, with the real outlines of its nineteen communes, from OpenStreetMap. The sensors are simulated.
 
-The colour is the health of the sensors inside. The brown district is below ninety percent.
+The base map has the water, the canal. The parks. And the communes, with their names.
 
-And you can ask what is near a point, in metres. One within-distance function, on an indexed geography column.
+The colour is the health of the sensors inside. Two communes stand out, Koekelberg and Auderghem.
+
+The simulator places each sensor inside its real commune, nearly half of them beside the main roads.
+
+So you can ask what is near a point, in metres. This is Ixelles. The nearest healthy sensors are a hundred and one, a hundred and seventy-six, and two hundred and forty-nine metres away. The neighbouring communes are one point seven, two point four, and three point five kilometres away. PostGIS answers that on the real outlines.
 
 ## 3 am_eric
 Now the question an operator asks. What is wrong in this district, and have we seen it before?
@@ -29,9 +35,11 @@ No PostGIS here, so the geo part says so. And this fresh database has no past ep
 
 Open Show the SQL. It really is one statement.
 
-Here is the same card on the live fleet, captured. All five models, in the same statement.
+Here is the same card on the live fleet, for Ixelles, captured. Five data models, one SQL statement.
 
-Geo: the nearest healthy sensors, nine metres away, and the neighbouring districts. Vector: three similar past episodes, found by pgvector.
+Geo: the centre of its sensors, the nearest healthy ones, and the neighbouring communes, from PostGIS.
+
+Vector: three similar past episodes, found by pgvector. That part is from the capture of the twenty-eighth of October.
 
 ## 4 af_heart
 Now, live data. The simulator is sending readings right now.

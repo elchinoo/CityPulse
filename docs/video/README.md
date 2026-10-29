@@ -21,9 +21,9 @@ Structure (problem first, about 5 minutes; story: *my data is time series, JSON,
 
 | Scene | Topic | Voice | Local or captured |
 |---|---|---|---|
-| 1 | The problem (a city, sensors from many vendors, "the usual answer is four databases") and who is who: PLATFORM = EDB Postgres on AgentPG, REFERENCE SCAFFOLDING = identity, gateway, vault (swap any of it, said at second 18), SAMPLE APP = CityPulse and its simulator | `am_liam` | diagram |
-| 2 | The map: sensors with lat/lon, outlines derived from the positions, health colours, "what is near this point, in metres" (`ST_DWithin`) | `af_heart` | sensor detail and "Map not available" local; the map captured; the query is labelled source text |
-| 3 | One SQL statement across five models (the Explain tab) | `am_eric` | relational, time series, JSON and the SQL local; all five models captured |
+| 1 | The problem (a city, sensors from many vendors, "the usual answer is four databases") and who is who: PLATFORM = EDB Postgres on AgentPG, REFERENCE SCAFFOLDING = identity, gateway, vault (swap any of it, said at second 22), SAMPLE APP = CityPulse and its simulator; these apps are templates, not only demos (Apache 2.0) | `am_liam` | diagram |
+| 2 | The map: sensors with lat/lon; the city is real (Brussels, real commune outlines from OpenStreetMap) and the sensors are simulated; canal, parks, communes, health colours; "what is near this point, in metres" (Explain geo for Ixelles) | `af_heart` | sensor detail and "Map not available" local; the Brussels map and the geo part of Explain captured (29 Oct 2026) |
+| 3 | One SQL statement across five models (the Explain tab) | `am_eric` | relational, time series, JSON and the SQL local; the five-model card for Ixelles captured (29 Oct 2026); the vector part from the 28 Oct capture, under its own date |
 | 4 | Live data: the simulator, a new vendor's JSON + position batch, the JSONB query, the burst, the verdict falling | `af_heart` | local |
 | 5 | The alert hand-off: PagerLens opens an incident | `am_liam` | local (a real PagerLens) |
 | 6 | Insights: edb_stat_monitor, edb_pg_tuner, query_advisor | `af_heart` | "Not available" local; everything else captured |
@@ -31,11 +31,14 @@ Structure (problem first, about 5 minutes; story: *my data is time series, JSON,
 | 8 | Recap: look how much easier this is; try it yourself | `af_heart` | cards |
 
 **Real versus captured.** A local Postgres has no PostGIS and no `edb_*` extensions (`CREATE EXTENSION postgis` fails here: "extension is not
-available"), so those parts are never faked. The Map, the geo and vector part of the Explain card and the Insights come from real captures of the
-live AgentPG fleet (`videos/live-captures/`: `citypulse-map-gotham-*.jpg`, `citypulse-explain-*.jpg`, `paybroker-insights-*.jpg`,
-`extensions-installed.txt`, `ecoctl-insights.txt`), shown as stills with a slow zoom and highlight boxes under the banner *CAPTURED from the live
-AgentPG fleet, 28 Oct 2026*. Local scenes carry a green badge *RUNNING LOCALLY*. CityPulse has no AI model, so there is no stand-in model. Nothing
-is shown for high availability, failover or AIDB. The live fleet is never touched by the build.
+available"), so those parts are never faked. The Map, the geo part of the Explain card and the Insights come from real captures of the live
+AgentPG fleet (`videos/live-captures/`: `citypulse-map-brussels-2026-10-29.jpg`, `citypulse-explain-top-brussels-2026-10-29.jpg`,
+`citypulse-explain-geo-brussels-2026-10-29.jpg` under the banner *CAPTURED from the live AgentPG fleet, 29 Oct 2026*; the vector part from
+`citypulse-explain-geo-vector-2026-10-28.jpg`, `paybroker-insights-*.jpg`, `extensions-installed.txt` and `ecoctl-insights.txt` under the banner
+with their own date, 28 Oct 2026), shown as stills with a slow zoom (no tint) and highlight boxes. The 28 Oct Gotham map is not used. The city
+on the map is real (Brussels, boundaries from OpenStreetMap, ODbL) and the sensors are simulated. Local scenes carry a green badge
+*RUNNING LOCALLY* and use the simulator's own city `paris`. CityPulse has no AI model, so there is no stand-in model. The live fleet is never
+touched by the build.
 
 What `build.py` does (same shape as the TrustDesk and PayBroker builds):
 
@@ -59,8 +62,8 @@ recording something false. The burst scene prints `CHECK` lines (verdict at the 
 
 Writing narration: one `## <scene id> <voice>` section per scene; short sentences, one idea each; a blank line is a pause, `...` a short beat,
 `[pause 1.5]` a deliberate pause (the shared tool halves it); never change voice inside a scene; voices only `am_liam`, `af_heart`, `am_eric`,
-male and female alternate, no voice twice in a row, never `af_nicole`. Acronyms are respelled hyphenated in `pronounce.json` (`PostGIS` is
-post-gee-eye-ess, `JSONB` jay-son-bee). If you change a sentence the recorder anchors an action to, update the matching `at(...)` text in
+male and female alternate, no voice twice in a row, never `af_nicole`. Acronyms are respelled with spaces and no hyphens in `pronounce.json` (`PostGIS` is
+post gee eye ess, `JSONB` jay son bee, `OIDC` oh eye dee see); `API` has no entry, it is spoken from the written form. If you change a sentence the recorder anchors an action to, update the matching `at(...)` text in
 `record.spec.ts` (it fails loudly when no sentence contains the text).
 
 Options and environment: `--deliver DIR` copies the mp4 and srt; `--work DIR` moves `out/build`; `--keep-recording` re-mixes a previous take;
