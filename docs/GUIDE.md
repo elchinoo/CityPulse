@@ -299,8 +299,12 @@ Invalid numeric values silently fall back to the default; out-of-range values ar
 | `CITYPULSE_OIDC_CLIENT_SECRET[_FILE]` | none | Web client secret. |
 | `CITYPULSE_PUBLIC_URL` | none | The URL CityPulse is reached at; used to build the callback and logout return. If unset, the request's own host (and forwarded protocol) is used. `ecoctl` does not set it (not found in `ecosystem/src/ecoctl`). |
 | `CITYPULSE_LOCAL_LOGIN` | `true` | With SSO on, `false` makes the server refuse the admin-password and API-key sign-in (`403`). |
-| `CITYPULSE_API_KEY[_FILE]` | none (file default `/etc/citypulse/api_key`) | Optional static full-access key for automation; also usable as a sign-in key in the UI. |
-| `CITYPULSE_ALLOW_ANONYMOUS` | `false` | Demo only: disables authentication entirely. Accepts `1`, `true`, `yes`, `on`. |
+| `CITYPULSE_API_KEY[_FILE]` | none (file default `/etc/citypulse/api_key`) | Optional static full-access key for automation; also usable as a sign-in key in the UI. At least 32 characters: a shorter key is refused (logged at startup), and a startup warning is logged when one is enabled. |
+| `CITYPULSE_ALLOW_ANONYMOUS` | `false` | Demo only: disables authentication entirely. Accepts `1`, `true`, `yes`, `on`. Honoured only when the bind address is loopback (`CITYPULSE_HOST`, else `HOST`, default `127.0.0.1`) or `CITYPULSE_ALLOW_ANONYMOUS_PUBLIC=1`; the image binds `0.0.0.0`, so it is refused there. |
+| `CITYPULSE_HOST` | `HOST` | Optional bind address used for the anonymous-mode check (set it when it differs from `HOST`). |
+| `CITYPULSE_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Comma-separated proxy addresses or CIDRs uvicorn trusts for `X-Forwarded-*`. Never `*`: with it any caller could choose the address the app sees. |
+| `CITYPULSE_TRUSTED_HOPS` | `1` | Number of proxies in front of CityPulse; the rate limiter keys on the `X-Forwarded-For` entry that many places from the right (`0` = the socket peer). The app must only be reachable through the proxy. |
+| `CITYPULSE_ALLOW_PRIVATE_URLS` | `false` | Lets `PAGERLENS_URL` point at a private or local address. The URL is resolved once and the connection is pinned to the validated address; redirects are never followed. |
 | `CITYPULSE_SERVICE_CLIENT_ID` | `citypulse-service` | CityPulse's own service client, used to get its PagerLens token. |
 | `CITYPULSE_SERVICE_CLIENT_SECRET[_FILE]` | none | Its secret. |
 

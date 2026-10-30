@@ -432,3 +432,29 @@ def test_reporter_escalates_and_recovers_a_city(monkeypatch):
     last = _of(posts, "/api/ingest/metrics")[-1]
     assert last[0] == "citypulse-fleet-rome" and {p["name"]: p["value"] for p in last[1]["points"]}["fleet_health_pct"] == 100.0
     assert rep.city_state == {} and len(_of(posts, "/api/ingest/alerts")) == 2               # recovered: reported once, then dropped
+
+
+def test_anonymous_mode_needs_a_loopback_bind_and_short_static_keys_are_refused(monkeypatch):
+    from apgkit.auth import Authenticator
+
+    from citypulse import core
+    monkeypatch.setenv("CITYPULSE_ALLOW_ANONYMOUS", "true")
+    monkeypatch.delenv("CITYPULSE_ALLOW_ANONYMOUS_PUBLIC", raising=False)
+    mk = lambda host: Authenticator(core.APP_AUTH, core.local, core.db, cookie_name="x", bind_host=host,   # noqa: E731
+                                    allow_anonymous=lambda: True)
+    assert mk("127.0.0.1").anonymous_allowed() and not mk("0.0.0.0").anonymous_allowed()
+    from apgkit.config import static_key_problem
+    assert static_key_problem("too-short") and not static_key_problem("k" * 40)
+
+
+def test_reporter_pins_the_pagerlens_address_and_refuses_private_ones_by_default(monkeypatch):
+    import asyncio
+
+    monkeypatch.delenv("CITYPULSE_ALLOW_PRIVATE_URLS", raising=False)
+    rep = reporter.Reporter("http://127.0.0.1:9", "t")
+    with pytest.raises(RuntimeError, match="refused"):
+        asyncio.run(rep.post("/api/ingest/services", {}))
+    t = reporter.guard.resolve("http://93.184.216.34") if False else None  # noqa: F841 - no network in tests
+    monkeypatch.setenv("CITYPULSE_ALLOW_PRIVATE_URLS", "true")
+    url, headers, _ = reporter.guard.resolve("http://127.0.0.1:9").request_args("/x")
+    assert url == "http://127.0.0.1:9/x" and headers["Host"] == "127.0.0.1:9"

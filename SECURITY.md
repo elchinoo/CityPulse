@@ -31,7 +31,17 @@ version or commit.
   and `full` (everything an admin session can do, including starting bursts, managing tokens and deleting cities). Scopes are strict:
   each maps to exactly one permission (`ingest:write`, `city:read`, `metrics:scrape`); only `full` holds them all.
 - With no credential configured the app **denies everything**. Anonymous access exists only behind the explicit
-  opt-in `CITYPULSE_ALLOW_ANONYMOUS=true`; never use it on a reachable host.
+  opt-in `CITYPULSE_ALLOW_ANONYMOUS=true`, which is honoured only on a loopback bind (or with
+  `CITYPULSE_ALLOW_ANONYMOUS_PUBLIC=1`); never use it on a reachable host. A static `CITYPULSE_API_KEY` must be at least 32 characters.
+- Single sign-on binds each login to the browser that started it with a short-lived HttpOnly cookie (`apg_oidc_bind`); a callback
+  without it is refused.
+- The client address used for rate limiting comes from `X-Forwarded-For` counted from the right (`CITYPULSE_TRUSTED_HOPS`, default 1),
+  and uvicorn trusts forwarded headers only from `CITYPULSE_FORWARDED_ALLOW_IPS` (default `127.0.0.1`). Keep the app reachable only
+  through your proxy. Password sign-in counts the attempt before hashing; when every password-hashing slot is busy the server answers 503
+  with `Retry-After`.
+- The PagerLens reporter resolves its URL once, checks it and connects to that validated address; private or local targets need
+  `CITYPULSE_ALLOW_PRIVATE_URLS=true`.
+- Upgrade note: this release needs `agentpg-kit` 0.4.0. Run all processes of one deployment on the same version.
 - Failed credentials are rate limited (10 per minute per client address, in memory, per process). Behind a reverse
   proxy all clients can share one address, so add proxy-level limits too.
 

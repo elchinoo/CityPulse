@@ -19,7 +19,8 @@ def _serve() -> None:
     _check_sim()
 
     uvicorn.run("citypulse.api:app", host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")),
-                proxy_headers=True, forwarded_allow_ips="*", log_level=os.environ.get("LOG_LEVEL", "info"))
+                proxy_headers=True, forwarded_allow_ips=os.environ.get("CITYPULSE_FORWARDED_ALLOW_IPS", "127.0.0.1"),
+                log_level=os.environ.get("LOG_LEVEL", "info"))
 
 
 def main(argv: list[str] | None = None) -> None:

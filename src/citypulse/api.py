@@ -11,8 +11,8 @@ import psycopg
 from apgkit import insights as kit_insights
 from apgkit import masking
 from apgkit.auth import TokenError
-from apgkit.auth.rp import safe_return_to
-from apgkit.config import env_bool
+from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
+from apgkit.config import env_bool, trusted_hops
 from apgkit.guard import SecurityGuard
 from apgkit.web import is_https, mount_kit_static, public_url
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -113,7 +113,7 @@ def require(permission: str = "city:read"):
 app = FastAPI(title="CityPulse", version=__version__, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/",), body_prefixes=("/api/", "/v1/"),
-                   max_body=MAX_BODY, observe=core.metrics.observe)
+                   max_body=MAX_BODY, observe=core.metrics.observe, trusted_hops=trusted_hops("CITYPULSE"))
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 mount_kit_static(app)
 
@@ -223,32 +223,43 @@ def sso_login(request: Request, next: str | None = None):
         raise HTTPException(404, "single sign-on is not configured")
     try:
         with connect(retries=1) as conn:
-            url = fed.rp.begin(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
+            login = fed.rp.start(conn, public_url(request, core.public_url_env) + "/auth/callback", next)
     except psycopg.Error as exc:
         raise _db_unavailable() from exc
     except Exception:  # noqa: BLE001 - the identity provider may be unreachable
         return RedirectResponse("/?sso_error=the identity provider is unavailable", status_code=303)
-    return RedirectResponse(url, status_code=303)
+    resp = RedirectResponse(login.url, status_code=303)
+    login.bind(resp, secure=is_https(request))          # binds the login to this browser; the callback refuses it without
+    return resp
 
 
 @app.get("/auth/callback")
 def sso_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if not fed.enabled:
         raise HTTPException(404, "single sign-on is not configured")
+    secure = is_https(request)
+
+    def refuse(message: str) -> RedirectResponse:
+        resp = RedirectResponse("/?sso_error=" + message, status_code=303)
+        clear_binding(resp, secure=secure)
+        return resp
+
     if error or not code or not state:
-        return RedirectResponse("/?sso_error=the sign-in was cancelled or failed", status_code=303)
+        return refuse("the sign-in was cancelled or failed")
     try:
         with connect(retries=1) as conn:
-            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state)
+            claims, back, id_token = fed.rp.finish(conn, public_url(request, core.public_url_env) + "/auth/callback", code, state,
+                                                   request.cookies.get(BINDING_COOKIE))
             roles = [r for r in claims.get("roles", []) if isinstance(r, str)]
             resp = RedirectResponse(safe_return_to(back), status_code=303)
+            clear_binding(resp, secure=secure)
             if not core.APP_AUTH.permissions_for(roles=roles):
-                return RedirectResponse("/?sso_error=your account has no role in CityPulse; ask an administrator", status_code=303)
+                return refuse("your account has no role in CityPulse; ask an administrator")
             _start_session(conn, request, resp, subject=str(claims["sub"]), name=str(claims.get("name") or ""),
                            email=str(claims.get("email") or ""), roles=roles, source="oidc", id_token_hint=id_token)
             return resp
     except TokenError as exc:
-        return RedirectResponse("/?sso_error=" + str(exc)[:120], status_code=303)
+        return refuse(str(exc)[:120])
 
 
 @app.post("/api/setup")
@@ -273,18 +284,22 @@ def setup(body: SetupBody, request: Request, response: Response):
 @app.post("/api/login")
 def login(body: LoginBody, request: Request, response: Response):
     _api_role()
-    client = _guard_attempts(request)
+    client = auth.client(request)
     if fed.enabled and not fed.local_login:
         raise HTTPException(403, "local sign-in is turned off; use single sign-on")
     try:
         with connect(retries=1) as conn:
             ok = False
             if body.password is not None:
-                ok = local.login_password(conn, body.password)
-            elif body.api_key is not None and local.static_key_matches(body.api_key):
-                ok = True
+                # counts the attempt before hashing (429 over the limit, 503 ScryptBusy propagates as an HTTPException)
+                ok = local.login_password(conn, body.password, client=client, limiter=auth.limiter)
+            elif body.api_key is not None:
+                if auth.limiter.limited(client):
+                    raise HTTPException(429, "too many failed attempts; wait a minute")
+                ok = local.static_key_matches(body.api_key)
+                if not ok:
+                    auth.limiter.record(client)
             if not ok:
-                auth.limiter.record(client)
                 raise HTTPException(401, "invalid credentials")
             _start_session(conn, request, response)
     except (psycopg.Error, RuntimeError) as exc:

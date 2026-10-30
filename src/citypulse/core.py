@@ -3,6 +3,7 @@
 Permissions are what the code checks (`city:control`); roles (given to people by the identity provider) and scopes
 (given to services, local API tokens and the static key) are mapped onto them here, in one place.
 """
+import os
 import threading
 import time
 
@@ -80,7 +81,10 @@ def _cached_token(raw: str) -> Principal | None:
     return principal
 
 
-auth = Authenticator(APP_AUTH, local, db, cookie_name=COOKIE, verifier=fed.verifier,
+# CITYPULSE_ALLOW_ANONYMOUS is honoured only on a loopback bind (or CITYPULSE_ALLOW_ANONYMOUS_PUBLIC=1): pass the address the
+# server really binds to (cli.py: HOST, default 127.0.0.1), preferring CITYPULSE_HOST when set.
+BIND_HOST = os.environ.get("CITYPULSE_HOST") or os.environ.get("HOST", "127.0.0.1")
+auth = Authenticator(APP_AUTH, local, db, cookie_name=COOKIE, verifier=fed.verifier, bind_host=BIND_HOST,
                      allow_anonymous=lambda: env_bool("CITYPULSE_ALLOW_ANONYMOUS"),
                      bearer_resolvers={TOKEN_PREFIX: _cached_token})
 public_url_env = "CITYPULSE_PUBLIC_URL"

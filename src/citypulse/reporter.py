@@ -20,6 +20,7 @@ import time
 import httpx
 from apgkit.auth import TokenSource
 from apgkit.config import read_secret
+from apgkit.netguard import NetGuard, UnsafeURL
 
 from . import __version__, metrics, status
 from .config import get_settings
@@ -106,9 +107,16 @@ def _snapshot(tracked: frozenset = frozenset()) -> dict:
         return {"overall": overall, "cities": cities}
 
 
+# PagerLens's address is operator configuration, but it is still resolved once, checked and pinned (no second DNS lookup between
+# the check and the connection). A private or local PagerLens needs CITYPULSE_ALLOW_PRIVATE_URLS=true.
+guard = NetGuard("CITYPULSE_ALLOW_PRIVATE_URLS")
+
+
 class Reporter:
     def __init__(self, url: str, token: str | None = None, source: TokenSource | None = None, transport=None):
         self.source = None if token else source
+        self.url = url
+        self.pin = transport is None             # tests inject a transport and need no DNS
         self.client = httpx.AsyncClient(base_url=url, timeout=15, follow_redirects=False, transport=transport,
                                         headers={"Authorization": f"Bearer {token}"} if token else {})
         self.rates = Rates()
@@ -119,7 +127,15 @@ class Reporter:
 
     async def post(self, path: str, body: dict) -> None:
         headers = await asyncio.to_thread(self.source.headers) if self.source else None   # cached; refreshed shortly before it expires
-        r = await self.client.post(path, json=body, headers=headers)
+        if self.pin:
+            try:
+                target = await asyncio.to_thread(guard.resolve, self.url)
+            except UnsafeURL as exc:
+                raise RuntimeError(f"PagerLens URL refused: {exc}") from exc
+            url, pinned, ext = target.request_args(path)
+            r = await self.client.post(url, json=body, headers={**(headers or {}), **pinned}, extensions=ext)
+        else:
+            r = await self.client.post(path, json=body, headers=headers)
         if r.status_code >= 300:
             raise RuntimeError(f"PagerLens answered HTTP {r.status_code} on {path}")
 

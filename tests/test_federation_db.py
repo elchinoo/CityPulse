@@ -193,6 +193,26 @@ def test_sso_refuses_people_without_a_role_here_and_replayed_or_foreign_logins(c
     assert client.get("/auth/callback", params={"error": "access_denied"}, follow_redirects=False).headers["location"].startswith("/?sso_error=")
 
 
+def test_sso_callback_without_the_browser_binding_cookie_is_refused(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    assert "apg_oidc_bind" in r.headers["set-cookie"] and "HttpOnly" in r.headers["set-cookie"]
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    client.cookies.clear()                                                                   # another browser finishes the login
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert cb.headers["location"].startswith("/?sso_error=") and "cp_session" not in cb.cookies
+    assert client.get("/api/status").status_code == 401
+
+
+def test_sso_binding_cookie_is_cleared_after_a_successful_login(client):
+    r = client.get("/auth/login", follow_redirects=False)
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    client.provider.nonce = q["nonce"][0]
+    cb = client.get("/auth/callback", params={"code": "c", "state": q["state"][0]}, follow_redirects=False)
+    assert "cp_session" in cb.cookies
+    assert "apg_oidc_bind" not in client.cookies                                             # single use: removed with the redirect
+
+
 def test_setup_is_not_offered_when_federated_and_local_login_can_be_turned_off(client, monkeypatch):
     s = client.get("/api/session").json()
     assert s["state"] == "logged_out" and s["sso"]["issuer"] == ISS                          # no setup screen: people sign in with SSO

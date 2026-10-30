@@ -33,8 +33,8 @@ def set_admin_password(conn, password: str) -> None:
     local.set_admin_password(conn, password)
 
 
-def login_password(conn, password: str) -> bool:
-    return local.login_password(conn, password)
+def login_password(conn, password: str, *, client: str | None = None, limiter=None) -> bool:
+    return local.login_password(conn, password, client=client, limiter=limiter)
 
 
 def change_password(conn, current: str, new: str) -> None:

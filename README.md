@@ -247,8 +247,11 @@ Services use `client_credentials` instead of a hand-copied token: scope `citypul
 | `INGEST_CONCURRENCY` | `8` | Batches written at once before the gateway answers 429 |
 | `PAGERLENS_URL`, `PAGERLENS_TOKEN` | – | Report to PagerLens (https required unless localhost) |
 | `CITYPULSE_OIDC_ISSUER` and friends | – | Single sign-on and service identity; see below |
-| `CITYPULSE_API_KEY` | – | Optional static full-access key for automation |
-| `CITYPULSE_ALLOW_ANONYMOUS` | `false` | Demo only: disables authentication entirely |
+| `CITYPULSE_API_KEY` | – | Optional static full-access key for automation; at least 32 characters (a shorter one is refused), e.g. `openssl rand -base64 36` |
+| `CITYPULSE_ALLOW_ANONYMOUS` | `false` | Demo only: disables authentication entirely; honoured only on a loopback bind (`HOST=127.0.0.1`) unless `CITYPULSE_ALLOW_ANONYMOUS_PUBLIC=1` |
+| `CITYPULSE_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxy addresses uvicorn trusts for `X-Forwarded-*` (never `*`) |
+| `CITYPULSE_TRUSTED_HOPS` | `1` | Proxies in front of the app for the client address used by the rate limiter (`0` = socket peer) |
+| `CITYPULSE_ALLOW_PRIVATE_URLS` | `false` | Allow a private or local `PAGERLENS_URL` (the address is resolved once and pinned) |
 
 Every secret also accepts a `<NAME>_FILE` variant for platforms that can only mount files.
 
