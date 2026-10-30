@@ -585,7 +585,8 @@ def test_a_burst_shows_up_in_the_fingerprint():
 
 def test_seed_history_is_deterministic_idempotent_labelled_and_removable():
     with connect() as c:
-        now = datetime(2026, 10, 28, 12, 7, tzinfo=UTC)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)         # relative to the wall clock: labelling compares with now()
+        last = memory.floor_window(now)
         out = history.seed(c, ["paris"], days=14, now=now)
         assert out["inserted"] == 14 * 96 * 12 and out["windows"] == 14 * 96
         digest = c.execute("SELECT md5(string_agg(district || window_end::text || features::text, ',' ORDER BY district, window_end)) AS m FROM episode").fetchone()["m"]
@@ -593,7 +594,7 @@ def test_seed_history_is_deterministic_idempotent_labelled_and_removable():
         assert again["inserted"] == 0, "re-running adds nothing"
         stats_ = c.execute("SELECT count(*) AS n, count(verdict_1h) AS labelled, count(duration_min) AS lasted, "
                            "count(*) FILTER (WHERE verdict <> 'operational') AS bad, max(window_end) AS last FROM episode").fetchone()
-        assert stats_["last"] == datetime(2026, 10, 28, 12, 0, tzinfo=UTC) and stats_["labelled"] > 0.99 * stats_["n"]
+        assert stats_["last"] == last and stats_["labelled"] > 0.99 * stats_["n"]
         assert 0 < stats_["bad"] < 0.1 * stats_["n"] and stats_["lasted"] > 0.5 * stats_["bad"], "episodes ended and know how long they lasted"
         lasted = c.execute("SELECT min(duration_min) AS lo, max(duration_min) AS hi FROM episode WHERE duration_min IS NOT NULL").fetchone()
         assert 15 <= lasted["lo"] and lasted["hi"] <= 9 * 15
