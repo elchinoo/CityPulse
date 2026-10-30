@@ -13,3 +13,7 @@ dist/
 docs/video/out/
 docs/video/node_modules/
 build/
+.ecosystem/
+!.env.*example
+*.dbkey
+api_key
