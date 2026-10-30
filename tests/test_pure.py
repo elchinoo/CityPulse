@@ -15,6 +15,13 @@ from citypulse.sim import BUFFER_MAX, Fatal, Retry, Simulator
 NOW = datetime.now(UTC)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_now():
+    """The gateway refuses readings from more than 2 minutes ahead: a slow run must not age the module-level clock."""
+    global NOW
+    NOW = datetime.now(UTC)
+
+
 def test_catalogue_has_27_types_with_sane_limits():
     assert len(TYPES) == 27
     for t in TYPES.values():
