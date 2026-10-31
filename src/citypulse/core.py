@@ -8,8 +8,11 @@ import threading
 import time
 
 from apgkit import metrics as metrics_mod
-from apgkit.auth import AppAuth, Authenticator, LocalAuth, Principal, from_env
-from apgkit.config import env_bool
+from apgkit.auth import AppAuth, Authenticator, LocalAuth, Principal
+from apgkit.auth.env import Federation
+from apgkit.auth.oidc import TokenVerifier, jwks_ttl_from_env
+from apgkit.auth.rp import RelyingParty
+from apgkit.config import env_bool, read_secret
 from apgkit.db import Database
 
 from . import __version__
@@ -46,7 +49,21 @@ SCOPE_PERMISSIONS = {
     "citypulse.ingest": frozenset({"ingest:write"}), "citypulse.read": frozenset({"city:read"}),
     "citypulse.metrics": frozenset({"metrics:scrape"}),
 }
-fed = from_env("CITYPULSE", APP)
+
+
+def _federation() -> Federation:
+    """Same as apgkit.auth.from_env, but the client secret is read when a login needs it, never at import: with sealed boot
+    the secret does not exist until the operator unseals the app. A public client (no secret) simply reads back ''."""
+    issuer = os.environ.get("CITYPULSE_OIDC_ISSUER", "").strip()
+    client_id = os.environ.get("CITYPULSE_OIDC_CLIENT_ID", APP)
+    local_login = env_bool("CITYPULSE_LOCAL_LOGIN", True)
+    if not issuer:
+        return Federation("", client_id, None, None, True)
+    return Federation(issuer.rstrip("/"), client_id, TokenVerifier(issuer, client_id, ttl=jwks_ttl_from_env("CITYPULSE")),
+                      RelyingParty(issuer, client_id, lambda: read_secret("CITYPULSE_OIDC_CLIENT_SECRET")), local_login)
+
+
+fed = _federation()
 APP_AUTH = AppAuth(APP, fed.client_id, ROLE_PERMISSIONS, SCOPE_PERMISSIONS)
 local = LocalAuth(APP_AUTH, env_prefix="CITYPULSE", token_prefix=TOKEN_PREFIX, token_scopes={"read", "ingest", "metrics", "full"})
 

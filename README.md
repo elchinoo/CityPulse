@@ -277,6 +277,16 @@ not wake on a request (`agentpg sandbox resume <sandbox-id>`), which pauses the 
 store: it is fine for `CITYPULSE_ROLE` and sizes, but prefer running anything that holds a token off the sandbox.
 A resume may reuse a stale image; delete and recreate the sandbox to pull `:latest`.
 
+### Sealed boot
+
+Anything in a deployment's environment, config files or image is readable by whoever breaches the platform. With sealed boot
+the only thing deployed is one encrypted blob, `APGKIT_SEALED` (AES-256-GCM under an operator passphrase); set nothing else
+(no `DATABASE_URL`, ingest or PagerLens tokens, OIDC client secrets or API keys). CityPulse starts sealed: every route answers
+503 except `/_seal/*`, `/healthz`, `/health` and `/livez`. The operator sends the passphrase, encrypted to a key that exists
+only in that process; the app opens the blob, runs its start-up (migrations, status, masking and reporter loops) and serves.
+Create the blob and unseal with `ecoctl seal` from [agentpg-ecosystem](https://github.com/elchinoo/agentpg-ecosystem).
+CityPulse has no vault, so the passphrase only opens the blob. With no blob configured nothing changes.
+
 ## Tests
 
 ```bash

@@ -10,6 +10,7 @@ from typing import Any
 import psycopg
 from apgkit import insights as kit_insights
 from apgkit import masking
+from apgkit import sealed as sealing
 from apgkit.auth import TokenError
 from apgkit.auth.rp import BINDING_COOKIE, clear_binding, safe_return_to
 from apgkit.config import env_bool, trusted_hops
@@ -70,6 +71,9 @@ def _startup_tasks() -> None:
         pass
 
 
+sealed = sealing.Sealed.from_env()
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
     cfg = get_settings()
@@ -110,8 +114,9 @@ def require(permission: str = "city:read"):
     return auth.require(permission)
 
 
-app = FastAPI(title="CityPulse", version=__version__, lifespan=lifespan,
+app = FastAPI(title="CityPulse", version=__version__, lifespan=sealed.deferred(lifespan),
               docs_url=None, redoc_url=None, openapi_url=None)
+sealing.install(app, sealed)   # sealed boot (APGKIT_SEALED): 503 except /_seal/*, /healthz until unsealed; no blob = no change
 app.add_middleware(SecurityGuard, csrf_header=CSRF_HEADER, csrf_prefixes=("/api/",), body_prefixes=("/api/", "/v1/"),
                    max_body=MAX_BODY, observe=core.metrics.observe, trusted_hops=trusted_hops("CITYPULSE"))
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
