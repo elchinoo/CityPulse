@@ -528,6 +528,87 @@ def test_ask_end_to_end_with_a_scripted_model_returns_answer_sql_and_rows(ready,
     assert QUESTION not in caplog.text
 
 
+@pytest.fixture
+def big_burst(env):
+    """A city of three heavily hit districts and the NEWEST burst (so it is 'the last burst'), removed again afterwards: d09 lost 27 of 30 sensors at the
+    peak, d08 26, d07 25, d01 only 4."""
+    from citypulse import memory
+    now = datetime.now(UTC).replace(microsecond=0)
+    start = now - timedelta(hours=1)
+    with _runtime() as c:
+        c.execute("INSERT INTO chaos (kind, target, intensity, started_at, until) VALUES ('dropout', 'city:bigcity', 5, %s, %s)", (start, start + timedelta(minutes=10)))
+        for d, lost in (("d09", 27), ("d08", 26), ("d07", 25), ("d01", 4)):
+            for minute, n in ((5, lost // 2), (10, lost), (15, lost // 3)):
+                c.execute(memory.INSERT, memory.row_for(_stats("bigcity", d, total=30, ok=30 - n, offline=n, burst=0.9), start + timedelta(minutes=minute), "schedule"))
+        c.commit()
+    yield
+    with _runtime() as c:
+        c.execute("DELETE FROM episode WHERE city = 'bigcity'")
+        c.execute("DELETE FROM chaos WHERE target = 'city:bigcity'")
+        c.commit()
+
+
+BURST_EXPECTED = [("d09", 27), ("d08", 26), ("d07", 25), ("d01", 4)]
+
+
+def instructions_example_sql() -> str:
+    """The SQL the agent's instructions give for the burst question (so the test proves the example is accurate, not a copy of it)."""
+    from citypulse import aidb_mode
+    lines = aidb_mode.ASK_INSTRUCTIONS.splitlines()
+    return lines[lines.index("Q: which districts lost the most sensors during the last burst?") + 1]
+
+
+def test_the_burst_example_in_the_instructions_is_accurate_on_the_real_views(ready, big_burst):
+    with _runtime() as c:
+        rows = c.execute(instructions_example_sql()).fetchall()
+        c.rollback()
+    assert [(r["district"], r["sensors_lost"]) for r in rows] == BURST_EXPECTED and {r["city"] for r in rows} == {"bigcity"}
+
+
+def test_ask_burst_question_with_a_scripted_correct_model_returns_the_fixture_districts(ready, fake, on, http, big_burst):
+    fake.log.clear()
+    fake.script = [tool_call("semantic_kb_search", kb_name="cp_ask_kb", query_text="sensors lost during the last burst", top_k=5),
+                   tool_call("run_sql_query", query=instructions_example_sql()),
+                   "d09 lost the most sensors (27), then d08 (26) and d07 (25)."]
+    body = http.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert body["executed"] is True and body["retried"] is False and body["corrected"] is False and body["sql"] == instructions_example_sql()
+    assert [(r["district"], r["sensors_lost"]) for r in body["rows"]] == BURST_EXPECTED and body["answer"].startswith("d09 lost")
+
+
+def test_ask_a_wrong_column_is_corrected_with_the_error_and_the_real_columns(ready, fake, on, http, big_burst):
+    """What gpt-4.1-mini did against the real stack: d.district_id does not exist, and it stopped. Now it gets one correction round."""
+    fake.log.clear()
+    wrong = "SELECT d.district_id, i.peak_sensors_not_ok FROM cp_ask.burst_impact i JOIN cp_ask.districts d ON d.district_id = i.district"
+    fake.script = [tool_call("run_sql_query", query=wrong), "The query failed, I cannot answer.",
+                   tool_call("run_sql_query", query=instructions_example_sql()), "d09 lost 27, d08 26, d07 25."]
+    body = http.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert body["corrected"] is True and body["executed"] is True and not body["sql_error"] and body["sql"] == instructions_example_sql()
+    assert [r["district"] for r in body["rows"]][:3] == ["d09", "d08", "d07"] and [s["ok"] for s in body["steps"]] == [False, True]
+    seen = json.dumps(fake.log)
+    assert "does not exist" in seen and "cp_ask.burst_impact(burst_id" in seen and "NO district_id" in seen, "the correction round carries the error and the columns"
+
+
+def test_ask_sql_written_as_text_is_told_to_run_it_and_then_answers_from_rows(ready, fake, on, http, big_burst):
+    """What gemini-2.5-flash did: SQL in its answer, never run."""
+    fake.log.clear()
+    fake.script = [f"Here is the query:\n{instructions_example_sql()};", tool_call("run_sql_query", query=instructions_example_sql()),
+                   "d09 lost 27, d08 26, d07 25."]
+    body = http.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert body["retried"] is True and body["executed"] is True and [r["district"] for r in body["rows"]][:3] == ["d09", "d08", "d07"]
+    assert "Run your read-only SELECT now" in json.dumps(fake.log)
+
+
+def test_ask_a_model_that_never_runs_the_query_gets_no_answer_only_unverified_text(ready, fake, on, http):
+    fake.log.clear()
+    fake.script = [f"SELECT 1 -- {QUESTION}", "I would run: SELECT district FROM cp_ask.districts; d09 probably."]
+    r = http.post("/api/ask", json={"question": QUESTION}, headers=BEARER)
+    body = r.json()
+    assert r.status_code == 200 and body["executed"] is False and body["answer"] is None and body["rows"] == [] and body["sql"] is None
+    assert "d09 probably" in body["unverified_text"] and body["retried"] is True
+    with _runtime() as c:
+        assert c.execute("SELECT outcome FROM cp_ai.ask_log ORDER BY id DESC LIMIT 1").fetchone()["outcome"] == "no_query"
+
+
 def test_the_semantic_search_finds_the_burst_views_by_meaning(ready, admin, on):
     """The semantic knowledge base itself (no model involved): the comments on the views are what it matches."""
     role = aidb.purpose_role_name("cp_ask")

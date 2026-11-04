@@ -121,9 +121,9 @@ GROUP BY c.id, c.kind, c.target, c.intensity, c.started_at, c.until, h.city, h.d
 
 COMMENT ON SCHEMA cp_ask IS 'Derived read-only views of a smart-city sensor platform: districts, sensors, 5-minute roll-ups, health windows, incidents and bursts. No raw readings.';
 
-COMMENT ON VIEW cp_ask.districts IS 'One row per district of a city right now: how many sensors it has and how many are ok, stale, offline, in fault or stuck, its health percentage and its verdict (operational, degraded, partial_outage, major_outage).';
+COMMENT ON VIEW cp_ask.districts IS 'Key: (city, district). Sensors lost right now are sensors - sensors_ok. One row per district of a city right now: how many sensors it has and how many are ok, stale, offline, in fault or stuck, its health percentage and its verdict (operational, degraded, partial_outage, major_outage).';
 COMMENT ON COLUMN cp_ask.districts.city IS 'City id, for example paris.';
-COMMENT ON COLUMN cp_ask.districts.district IS 'District id within the city, for example d03 or molenbeek-saint-jean.';
+COMMENT ON COLUMN cp_ask.districts.district IS 'The district key, within the city, for example d03 or molenbeek-saint-jean. There is no district_id column anywhere: every view calls it district. A district is identified by (city, district) together.';
 COMMENT ON COLUMN cp_ask.districts.sensors IS 'Number of sensors installed in the district.';
 COMMENT ON COLUMN cp_ask.districts.sensors_ok IS 'Sensors reporting normally right now.';
 COMMENT ON COLUMN cp_ask.districts.sensors_stale IS 'Sensors whose last reading is late.';
@@ -134,10 +134,10 @@ COMMENT ON COLUMN cp_ask.districts.health_pct IS 'Share of the district''s senso
 COMMENT ON COLUMN cp_ask.districts.verdict IS 'operational (97 percent ok or more), degraded (85 to 97), partial_outage (50 to 85), major_outage (below 50).';
 COMMENT ON COLUMN cp_ask.districts.last_reading_at IS 'When the district''s newest reading was taken.';
 
-COMMENT ON VIEW cp_ask.sensors IS 'One row per sensor: where it is (city, district), what it measures, how it reports, its judged status and the newest reading.';
+COMMENT ON VIEW cp_ask.sensors IS 'Key: sensor_id. The district of a sensor is the column district (with city); there is no district_id. Join to cp_ask.districts on (city, district). One row per sensor: where it is (city, district), what it measures, how it reports, its judged status and the newest reading.';
 COMMENT ON COLUMN cp_ask.sensors.sensor_id IS 'Sensor identifier.';
 COMMENT ON COLUMN cp_ask.sensors.city IS 'City id of the sensor; joins to cp_ask.districts.city.';
-COMMENT ON COLUMN cp_ask.sensors.district IS 'District id of the sensor; joins to cp_ask.districts.district.';
+COMMENT ON COLUMN cp_ask.sensors.district IS 'The district key of the sensor (not district_id); joins to cp_ask.districts.district together with city.';
 COMMENT ON COLUMN cp_ask.sensors.sensor_type IS 'What the sensor measures, for example temperature, air_quality_pm25, traffic_count or water_level.';
 COMMENT ON COLUMN cp_ask.sensors.protocol IS 'How the sensor reports: http, otlp or an industrial protocol such as modbus_tcp.';
 COMMENT ON COLUMN cp_ask.sensors.status IS 'ok, stale, offline, fault or stuck.';
@@ -146,7 +146,7 @@ COMMENT ON COLUMN cp_ask.sensors.status_since IS 'When the sensor entered its cu
 COMMENT ON COLUMN cp_ask.sensors.last_reading_at IS 'Event time of the sensor''s newest reading.';
 COMMENT ON COLUMN cp_ask.sensors.last_value IS 'Value of the newest reading, in the unit of the sensor type.';
 
-COMMENT ON VIEW cp_ask.readings_5m IS 'Five-minute roll-ups of the readings per district and sensor type: how many, how many sensors reported, how many were out of range, and the minimum, average and maximum value. Aggregates only.';
+COMMENT ON VIEW cp_ask.readings_5m IS 'Key: (city, district, sensor_type, bucket_start); join to cp_ask.districts on (city, district). Five-minute roll-ups of the readings per district and sensor type: how many, how many sensors reported, how many were out of range, and the minimum, average and maximum value. Aggregates only.';
 COMMENT ON COLUMN cp_ask.readings_5m.city IS 'City id.';
 COMMENT ON COLUMN cp_ask.readings_5m.district IS 'District id.';
 COMMENT ON COLUMN cp_ask.readings_5m.sensor_type IS 'Sensor type measured.';
@@ -158,7 +158,7 @@ COMMENT ON COLUMN cp_ask.readings_5m.avg_value IS 'Average value in the bucket.'
 COMMENT ON COLUMN cp_ask.readings_5m.min_value IS 'Minimum value in the bucket.';
 COMMENT ON COLUMN cp_ask.readings_5m.max_value IS 'Maximum value in the bucket.';
 
-COMMENT ON VIEW cp_ask.district_health IS 'The health history of every district: one row per fingerprint window (every 15 minutes and at every verdict change) with the verdict, the health percentage and how many sensors were not ok.';
+COMMENT ON VIEW cp_ask.district_health IS 'Key: episode_id; one row per (city, district, window_end), the district column is the key (not district_id), join to cp_ask.districts on (city, district). The health history of every district: one row per fingerprint window (every 15 minutes and at every verdict change) with the verdict, the health percentage and how many sensors were not ok.';
 COMMENT ON COLUMN cp_ask.district_health.episode_id IS 'Identifier of the fingerprint window.';
 COMMENT ON COLUMN cp_ask.district_health.city IS 'City id.';
 COMMENT ON COLUMN cp_ask.district_health.district IS 'District id.';
@@ -169,7 +169,7 @@ COMMENT ON COLUMN cp_ask.district_health.sensors IS 'Sensors in the district at 
 COMMENT ON COLUMN cp_ask.district_health.sensors_not_ok IS 'Sensors that were stale, offline, in fault or stuck: the sensors lost.';
 COMMENT ON COLUMN cp_ask.district_health.trigger IS 'schedule (every 15 minutes), verdict_change or seed (demo history).';
 
-COMMENT ON VIEW cp_ask.incidents IS 'Incidents: the health windows whose verdict was not operational, with the share of sensors stale, offline, in fault or stuck, how much of the window a burst was active, and the outcome once it is known (the verdict an hour later, when the stretch began and ended, how long it lasted).';
+COMMENT ON VIEW cp_ask.incidents IS 'Key: episode_id; the district column is the district key (not district_id), join to cp_ask.districts on (city, district). Incidents: the health windows whose verdict was not operational, with the share of sensors stale, offline, in fault or stuck, how much of the window a burst was active, and the outcome once it is known (the verdict an hour later, when the stretch began and ended, how long it lasted).';
 COMMENT ON COLUMN cp_ask.incidents.episode_id IS 'Identifier of the incident window.';
 COMMENT ON COLUMN cp_ask.incidents.city IS 'City id.';
 COMMENT ON COLUMN cp_ask.incidents.district IS 'District id.';
@@ -188,7 +188,7 @@ COMMENT ON COLUMN cp_ask.incidents.episode_start IS 'When this run of bad verdic
 COMMENT ON COLUMN cp_ask.incidents.ended_at IS 'When the district was operational again.';
 COMMENT ON COLUMN cp_ask.incidents.duration_min IS 'How long the incident lasted, in minutes.';
 
-COMMENT ON VIEW cp_ask.bursts IS 'Bursts: the faults injected through the burst button (flood, noise, dropout, stuck, late, corrupt, slow_db) with their target, intensity, start and end.';
+COMMENT ON VIEW cp_ask.bursts IS 'Key: burst_id. A burst has no district column: its target says what it hit (all, city:<id>, district:<id> or type:<sensor type>); the districts it hit are in cp_ask.burst_impact. The last burst is the row with the newest started_at. Bursts: the faults injected through the burst button (flood, noise, dropout, stuck, late, corrupt, slow_db) with their target, intensity, start and end.';
 COMMENT ON COLUMN cp_ask.bursts.burst_id IS 'Burst identifier.';
 COMMENT ON COLUMN cp_ask.bursts.kind IS 'flood, noise, dropout, stuck, late, corrupt or slow_db.';
 COMMENT ON COLUMN cp_ask.bursts.target IS 'all, city:<id>, district:<id> or type:<sensor type>.';
@@ -196,7 +196,7 @@ COMMENT ON COLUMN cp_ask.bursts.intensity IS 'Strength from 1 (light) to 5 (heav
 COMMENT ON COLUMN cp_ask.bursts.started_at IS 'When the burst began.';
 COMMENT ON COLUMN cp_ask.bursts.ends_at IS 'When the burst ended or will end.';
 
-COMMENT ON VIEW cp_ask.burst_impact IS 'What each burst did to each district: the most sensors not ok and the worst health seen from the start of the burst until 30 minutes after its end. Use it for questions such as which districts lost the most sensors during the last burst (order by bursts.started_at desc).';
+COMMENT ON VIEW cp_ask.burst_impact IS 'What each burst did to each district: the most sensors not ok and the worst health seen from the start of the burst until 30 minutes after its end. Key: (burst_id, city, district); the district column is the district key (not district_id); join to cp_ask.bursts on burst_id and to cp_ask.districts on (city, district). Sensors lost per district is peak_sensors_not_ok. For which districts lost the most sensors during the last burst: filter burst_id to the newest row of cp_ask.bursts (order by started_at desc limit 1) and order by peak_sensors_not_ok desc.';
 COMMENT ON COLUMN cp_ask.burst_impact.burst_id IS 'Burst identifier; joins to cp_ask.bursts.burst_id.';
 COMMENT ON COLUMN cp_ask.burst_impact.kind IS 'Burst kind.';
 COMMENT ON COLUMN cp_ask.burst_impact.target IS 'Burst target.';
@@ -204,7 +204,7 @@ COMMENT ON COLUMN cp_ask.burst_impact.intensity IS 'Burst intensity 1 to 5.';
 COMMENT ON COLUMN cp_ask.burst_impact.started_at IS 'When the burst began.';
 COMMENT ON COLUMN cp_ask.burst_impact.ends_at IS 'When the burst ended.';
 COMMENT ON COLUMN cp_ask.burst_impact.city IS 'City id of the affected district.';
-COMMENT ON COLUMN cp_ask.burst_impact.district IS 'District id of the affected district.';
+COMMENT ON COLUMN cp_ask.burst_impact.district IS 'The district key of the affected district (not district_id); with city it joins to cp_ask.districts.';
 COMMENT ON COLUMN cp_ask.burst_impact.sensors IS 'Sensors in the district.';
 COMMENT ON COLUMN cp_ask.burst_impact.peak_sensors_not_ok IS 'The most sensors lost (not ok) in any window of the burst: the sensors the burst cost the district.';
 COMMENT ON COLUMN cp_ask.burst_impact.worst_health_pct IS 'The lowest health percentage seen during the burst.';

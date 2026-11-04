@@ -320,6 +320,14 @@ to each district). `sql` and `rows` are **read back from AIDB's own action log**
 own rows), so they are what ran, not what the model says it ran; rows are capped at 200. A statement the database refused (the agent was asked to read
 `reading`, `app_setting`, a token table...) comes back as `sql_error` and is a `denied` decision in AIDB's governance trace.
 
+**A model that does not do the job is not presented as an answer.** The response always says what really ran. A model that answers **without running
+`run_sql_query`** (it wrote the SQL into its answer) is told once, in the same conversation, to run it (`retried: true`); if still nothing ran the response is
+`executed: false`, `answer: null`, and the model's text comes back only as `unverified_text`. A query that fails on a wrong name (unknown column or table,
+ambiguous column, syntax error; **not** a permission refusal) gets one correction round with the database's error and the actual columns of the `cp_ask`
+views, read from the catalog at request time and bounded in size (`corrected: true`). The keys are stated in the view comments and in the agent's
+instructions (a district is `city` + `district`, there is no `district_id`) together with worked examples, among them the question above. After upgrading,
+run `citypulse aidb-setup` again so the knowledge base and the agent's sealed instructions pick up the new comments and text.
+
 What the views leave out: the `reading` table (no raw per-reading flood), sensor positions, `sensor.attrs` (free-form vendor metadata), API tokens,
 sessions and settings (the views depend on `sensor`, `rollup_5m`, `episode` and `chaos` only; a test checks the dependency list). The purpose role is
 a NOLOGIN role with `SELECT` on those seven views plus the semantic-KB metadata tables AIDB's search needs, and nothing else.
@@ -384,8 +392,11 @@ embedded without app code); the semantic search finding the burst views by meani
 (`tests/aidbfake.py`) calling `semantic_kb_search` and `run_sql_query`, with answer, SQL and rows; a refused query reported and recorded as a denied decision
 in the governance view; tampering with an agent, a planted agent, a forged and a deleted seal, a rewritten view and semantic knowledge base, a missing seal
 table, and the operator's repair. Plain-Postgres tests (CI) cover the switch and its default, the views and what they leave out, the incident texts, every
-fallback, the vault paths (platform secret, passphrase, sealed boot) and the commands. **Not verified:** a real chat model (how well one follows AIDB's
-simulated tool calling and writes SQL over these views is unknown; only scripted answers ran), the llm-gateway (the tests register a plain-http stand-in with
+fallback, the vault paths (platform secret, passphrase, sealed boot) and the commands. The two real-model failures seen in the Docker dev stack (a column that
+does not exist, `d.district_id`; SQL written as the answer and never run) are reproduced with the scripted model, together with the corrected and the retried
+happy paths, and the example SQL for the burst question is run against the real views on a fixture city and its newest burst. **Not verified:** that a real
+chat model now gets the burst question right (a real run with gpt-4.1-mini and with gemini-2.5-flash through the gateway failed before these changes and has
+not been repeated since; a real model can still fail, and then the response says so instead of pretending: `executed: false`, or `sql_error`), the llm-gateway (the tests register a plain-http stand-in with
 `aidb.allow_insecure_egress`, a gateway URL must be https), an AgentPG-hosted AIDB (no role there has the AIDB grants yet), the read-only role `a1p_readonly`
 with the `cp_ask`/`cp_ai` schemas, PostGIS together with AIDB (the image has no PostGIS: the geo features are off in those tests, behaviour unchanged), sealed
 boot together with a live AIDB, load. The native `analyze_db_health` tool of the plan is not used.

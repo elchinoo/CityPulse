@@ -408,9 +408,9 @@ def test_ask_caps_the_rows_and_reports_a_refused_sql_instead_of_hiding_it(client
     agent["call"] = aidb_features.AgentCall("I could not read that.", "11111111-2222-3333-4444-555555555555", "", 5)
     body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
     assert body["sql"] == "SELECT * FROM public.reading" and body["rows"] == [] and "permission denied" in body["sql_error"]
-    agent["ran"] = []                                                    # an answer that ran no SQL: no sql, no rows, not an error
+    agent["ran"] = []                                                    # an answer that ran no SQL is not an answer (see the tests below)
     body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
-    assert body["sql"] is None and body["rows"] == [] and body["answer"]
+    assert body["sql"] is None and body["rows"] == [] and body["answer"] is None and body["executed"] is False and body["unverified_text"]
 
 
 def test_ask_failure_modes(client, agent):
@@ -692,3 +692,90 @@ def test_every_aidb_object_is_named_in_the_apps_own_namespace():
     assert all(n.startswith("cp_") for n in names)
     assert aidb_mode._mine("agent", "cp_ask_agent") and aidb_mode._mine("sql_tool", "semkb_cp_ask_kb_search") and not aidb_mode._mine("agent", "pb_triage_agent")
     assert aidb.purpose_role_name(aidb_mode.PURPOSE) == "aidb_p_cp_ask"
+
+
+# ---- questions: a model that does not run the query, or runs a wrong one ----------------------------------------------------------------------
+GOOD_RAN = [{"tool": "run_sql_query", "sql": "SELECT district, peak_sensors_not_ok FROM cp_ask.burst_impact", "ok": True,
+             "rows": [{"district": "d09", "peak_sensors_not_ok": 27}], "error": ""}]
+BAD_RAN = [{"tool": "run_sql_query", "sql": "SELECT d.district_id FROM cp_ask.districts d", "ok": False, "rows": None,
+            "error": 'Tool error: column d.district_id does not exist'}]
+CID = "11111111-2222-3333-4444-555555555555"
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Each agent call takes the next (text, what the action log then shows); records the prompts."""
+    monkeypatch.setenv("CITYPULSE_RETRIEVAL_BACKEND", "aidb")
+    monkeypatch.setattr(aidb_mode, "usable", lambda feature, conn: (True, ""))
+    box = {"steps": [], "prompts": [], "ran": []}
+
+    def call(conn, name, prompt, conversation_id=None):
+        box["prompts"].append((prompt, conversation_id))
+        text, ran = box["steps"].pop(0)
+        box["ran"] = ran
+        return aidb_features.AgentCall(text, CID, "", 5)
+    monkeypatch.setattr(aidb_features, "call_agent", call)
+    monkeypatch.setattr(aidb_features, "executed", lambda conn, cid, since: box["ran"])
+    return box
+
+
+def test_ask_a_model_that_wrote_sql_instead_of_running_it_is_told_once_in_the_same_conversation(client, scripted):
+    scripted["steps"] = [("SELECT district FROM cp_ask.districts;", []), ("d09 lost 27 sensors.", GOOD_RAN)]
+    body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert body["executed"] is True and body["retried"] is True and body["answer"] == "d09 lost 27 sensors." and body["rows"][0]["district"] == "d09"
+    assert len(scripted["prompts"]) == 2 and scripted["prompts"][1][1] == CID and "run_sql_query" in scripted["prompts"][1][0]
+    assert QUESTION not in scripted["prompts"][1][0], "a conversation is continued, the question is not repeated"
+
+
+def test_ask_a_model_that_still_runs_nothing_has_no_answer_only_unverified_text(client, scripted):
+    scripted["steps"] = [("SELECT 1;", []), ("Still just text: d09 lost 27.", [])]
+    r = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER)
+    body = r.json()
+    assert r.status_code == 200 and body["executed"] is False and body["answer"] is None and body["rows"] == [] and body["sql"] is None
+    assert body["unverified_text"] == "Still just text: d09 lost 27." and body["retried"] is True and len(scripted["prompts"]) == 2
+    with connect() as conn:
+        assert conn.execute("SELECT outcome FROM cp_ai.ask_log").fetchone()["outcome"] == "no_query"
+
+
+def test_ask_a_query_with_an_unknown_column_gets_one_correction_round_with_the_error_and_the_real_columns(client, scripted):
+    scripted["steps"] = [("I could not.", BAD_RAN), ("d09 lost 27 sensors.", BAD_RAN + GOOD_RAN)]
+    body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert body["executed"] is True and body["corrected"] is True and body["retried"] is False and body["answer"] == "d09 lost 27 sensors."
+    assert body["rows"] == GOOD_RAN[0]["rows"] and not body["sql_error"] and len(scripted["prompts"]) == 2
+    fix = scripted["prompts"][1][0]
+    assert "d.district_id does not exist" in fix and "cp_ask.burst_impact(burst_id, kind, target, intensity, started_at, ends_at, city, district" in fix
+    assert "cp_ask.sensors(sensor_id, city, district, sensor_type" in fix and "NO district_id" in fix
+    assert len(fix) < 4500, "the schema hint is bounded"
+
+
+def test_ask_gives_one_correction_round_only_and_none_for_a_refusal(client, scripted):
+    scripted["steps"] = [("no.", BAD_RAN), ("still no.", BAD_RAN)]
+    body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert len(scripted["prompts"]) == 2 and body["corrected"] is True and "does not exist" in body["sql_error"] and body["rows"] == []
+    scripted["prompts"].clear()
+    denied = [{"tool": "run_sql_query", "sql": "SELECT * FROM public.reading", "ok": False, "rows": None, "error": "permission denied for table reading"}]
+    scripted["steps"] = [("not allowed.", denied)]
+    body = client.post("/api/ask", json={"question": QUESTION}, headers=BEARER).json()
+    assert len(scripted["prompts"]) == 1 and body["corrected"] is False and "permission denied" in body["sql_error"]
+
+
+def test_the_schema_hint_is_generated_from_the_catalog_and_names_every_view(client):
+    with connect() as conn:
+        hint = aidb_features.schema_hint(conn)
+    for view, cols in aidb_objects.VIEWS.items():
+        assert f"{view}({', '.join(cols)})" in hint, view
+    assert len(hint) <= aidb_features.SCHEMA_HINT_MAX + len(aidb_features.KEYS_NOTE) + 1
+
+
+def test_the_comments_state_the_keys_and_the_instructions_carry_the_burst_example(client):
+    with connect() as conn:
+        c = {r["name"]: r["note"] for r in conn.execute(
+            "SELECT c.relname AS name, obj_description(c.oid, 'pg_class') AS note FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'cp_ask' AND c.relkind = 'v'").fetchall()}
+        col = conn.execute("SELECT col_description('cp_ask.sensors'::regclass, a.attnum) AS note FROM pg_attribute a "
+                           "WHERE a.attrelid = 'cp_ask.sensors'::regclass AND a.attname = 'district'").fetchone()["note"]
+    for view in ("sensors", "district_health", "burst_impact"):
+        assert "district_id" in c[view], view
+    assert "(city, district)" in c["districts"] and "burst_id" in c["burst_impact"] and "peak_sensors_not_ok" in c["burst_impact"]
+    assert "not district_id" in col
+    assert "FROM cp_ask.burst_impact i WHERE i.burst_id = (SELECT burst_id FROM cp_ask.bursts ORDER BY started_at DESC LIMIT 1)" in aidb_mode.ASK_INSTRUCTIONS
