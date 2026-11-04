@@ -14,6 +14,7 @@ from apgkit.auth.oidc import TokenVerifier, jwks_ttl_from_env
 from apgkit.auth.rp import RelyingParty
 from apgkit.config import env_bool, read_secret
 from apgkit.db import Database
+from apgkit.vault import Vault
 
 from . import __version__
 
@@ -23,6 +24,10 @@ CSRF_HEADER = "x-citypulse-csrf"
 TOKEN_PREFIX = "cp_"
 
 db = Database(pool_max=10)
+# The vault exists for one purpose here: its data key signs the AIDB definitions (apgkit.aidb seals). CityPulse stores no secret in the database
+# and has no admin-password unlock path for it; it is opened with the platform secret CITYPULSE_ENCRYPTION_KEY (env or /etc/citypulse/encryption_key)
+# or, under sealed boot, with the unseal passphrase. Nothing creates or opens it while AIDB mode is off (README, "AIDB mode").
+vault = Vault(APP.upper())
 metrics = metrics_mod.Metrics(APP, __version__)
 # db_insights_* gauges at /metrics (statistics from edb_stat_monitor / pg_stat_statements, cached 30 s; db_insights_available 0 where unreadable).
 metrics.add_insights_collector(lambda: db.connect(retries=1), top=5, min_calls=5, ttl=30)
@@ -34,12 +39,13 @@ PERMISSIONS = {
     "city:control": "start and stop bursts (the simulated city's faults)",
     "metrics:scrape": "scrape /metrics",
     "settings:manage": "API tokens and the admin password",
+    "city:ask": "ask the AIDB agent a question in natural language (POST /api/ask; each question costs a model call)",
     "city:delete": "delete a city with all its sensors, readings, history and burst targets (irreversible)",
 }
 # `city:delete` is held by the wildcard only: the admin role and the `full` local scope (and the static key); no other role or scope lists it.
 ROLE_PERMISSIONS = {
     "admin": ALL,
-    "operator": frozenset({"city:read", "city:control"}),
+    "operator": frozenset({"city:read", "city:control", "city:ask"}),
     "viewer": frozenset({"city:read"}),
 }
 SCOPE_PERMISSIONS = {
@@ -47,7 +53,7 @@ SCOPE_PERMISSIONS = {
     "ingest": frozenset({"ingest:write"}), "read": frozenset({"city:read"}), "metrics": frozenset({"metrics:scrape"}), "full": ALL,
     # scopes the identity provider can grant to services
     "citypulse.ingest": frozenset({"ingest:write"}), "citypulse.read": frozenset({"city:read"}),
-    "citypulse.metrics": frozenset({"metrics:scrape"}),
+    "citypulse.metrics": frozenset({"metrics:scrape"}), "citypulse.ask": frozenset({"city:ask"}),
 }
 
 

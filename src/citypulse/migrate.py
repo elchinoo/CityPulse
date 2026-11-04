@@ -9,7 +9,7 @@ def run() -> list[str]:
     from apgkit import migrate as kit_migrate
     from apgkit.auth.schema import SQL as AUTH_SQL
 
-    from . import geo, hardening, memory, timeseries
+    from . import aidb_objects, geo, hardening, memory, timeseries
     from .core import db
 
     # Two replicas may start together: serialise migrations.
@@ -17,8 +17,8 @@ def run() -> list[str]:
         lock_conn.execute("SELECT pg_advisory_lock(727401)")
         try:
             # Hooks run after the migrations, at every start: PostGIS and the district polygons (skipped quietly without PostGIS), and the
-            # read-only hardening (skipped quietly without the role a1p_readonly).
-            applied = kit_migrate.run(db, MIGRATIONS, after_migrate=[geo.ensure, memory.ensure, timeseries.ensure, hardening.hook])
+            # read-only hardening (skipped quietly without the role a1p_readonly), and the AIDB views (plain SQL, never raises).
+            applied = kit_migrate.run(db, MIGRATIONS, after_migrate=[geo.ensure, memory.ensure, timeseries.ensure, hardening.hook, aidb_objects.hook])
             with db.connect() as conn:  # after the app's own migrations: it upgrades the session table and adds the OIDC state
                 conn.execute(AUTH_SQL)
                 conn.commit()

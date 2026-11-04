@@ -252,6 +252,9 @@ Services use `client_credentials` instead of a hand-copied token: scope `citypul
 | `CITYPULSE_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxy addresses uvicorn trusts for `X-Forwarded-*` (never `*`) |
 | `CITYPULSE_TRUSTED_HOPS` | `1` | Proxies in front of the app for the client address used by the rate limiter (`0` = socket peer) |
 | `CITYPULSE_ALLOW_PRIVATE_URLS` | `false` | Allow a private or local `PAGERLENS_URL` (the address is resolved once and pinned) |
+| `CITYPULSE_RETRIEVAL_BACKEND` | `app` | AIDB mode switch (`app` or `aidb`; default unchanged), see [AIDB mode](#aidb-mode) |
+| `CITYPULSE_ENCRYPTION_KEY` | – | AIDB mode only: the platform secret that opens the seal key (also `_FILE`); not used while the switch is `app` |
+| `CITYPULSE_AIDB_ADMIN_DSN` | – | Admin connection string for `citypulse aidb-setup`, for that one command only (it prompts when unset); never put it in a compose or env file |
 
 Every secret also accepts a `<NAME>_FILE` variant for platforms that can only mount files.
 
@@ -285,13 +288,114 @@ the only thing deployed is one encrypted blob, `APGKIT_SEALED` (AES-256-GCM unde
 503 except `/_seal/*`, `/healthz`, `/health` and `/livez`. The operator sends the passphrase, encrypted to a key that exists
 only in that process; the app opens the blob, runs its start-up (migrations, status, masking and reporter loops) and serves.
 Create the blob and unseal with `ecoctl seal` from [agentpg-ecosystem](https://github.com/elchinoo/agentpg-ecosystem).
-CityPulse has no vault, so the passphrase only opens the blob. With no blob configured nothing changes.
+CityPulse has no vault for secrets, so the passphrase only opens the blob (with AIDB mode on it also opens the seal key, see [AIDB mode](#aidb-mode)). With no blob configured nothing changes.
+
+## AIDB mode
+
+Opt-in. With nothing set CityPulse behaves exactly as described above and none of this code runs (no vault is created, no incident text is written,
+`/readyz` says `"aidb": {"enabled": false}`). With EDB AI Accelerator (AIDB) in the database, two things can move into Postgres behind **one**
+switch, which falls back to the unchanged behaviour when AIDB is missing, not set up, locked or fails its seals:
+
+| Switch | Values | What it changes |
+|---|---|---|
+| `CITYPULSE_RETRIEVAL_BACKEND` | `app` (default), `aidb` | `GET /api/incidents/similar`: similar past incidents by the meaning of their text, from PostgreSQL full-text search (`app`) or an AIDB knowledge base kept live by a pipeline (`aidb`, through `apgkit.retrieval.select`). With `aidb`, `POST /api/ask` also works: a question in natural language, answered by an AIDB agent over read-only views. With `app` it answers 503. |
+
+The existing fingerprint similarity (`/api/districts/{id}/similar`, pgvector, `vector(16)`), the explain card, the status engine and the tools are
+untouched.
+
+**Ask in natural language.** `POST /api/ask {"question": "which districts lost the most sensors during the last burst?"}` (permission `city:ask`:
+admins, operators, the `full` token scope and the service scope `citypulse.ask`; a `read` token gets 403) returns
+
+```json
+{"answer": "During the last burst d01 lost the most sensors (12) ...", "sql": "SELECT i.district, ... FROM cp_ask.burst_impact i ...",
+ "rows": [{"district": "d01", "sensors_lost": 12}, {"district": "d02", "sensors_lost": 3}], "row_count": 3, "truncated": false,
+ "sql_error": "", "steps": [{"tool": "semantic_kb_search", "ok": true}, {"tool": "run_sql_query", "ok": true}], "conversation_id": "...", "agent": "cp_ask_agent"}
+```
+
+The agent first calls `semantic_kb_search` on a semantic knowledge base over the schema `cp_ask` (the comments on the views are what it matches),
+then runs one read-only SELECT with `run_sql_query` under a purpose whose role can read **only** these views: `cp_ask.districts` (now),
+`sensors`, `readings_5m` (the 5-minute roll-ups: aggregates, never raw readings), `district_health` (one row per district and 15-minute window),
+`incidents` (the windows that were not operational, with the shares that explain them and the outcome), `bursts` and `burst_impact` (what each burst did
+to each district). `sql` and `rows` are **read back from AIDB's own action log** (`aidb_internal.action_log`, where an `aidb_users` member sees only its
+own rows), so they are what ran, not what the model says it ran; rows are capped at 200. A statement the database refused (the agent was asked to read
+`reading`, `app_setting`, a token table...) comes back as `sql_error` and is a `denied` decision in AIDB's governance trace.
+
+What the views leave out: the `reading` table (no raw per-reading flood), sensor positions, `sensor.attrs` (free-form vendor metadata), API tokens,
+sessions and settings (the views depend on `sensor`, `rollup_5m`, `episode` and `chaos` only; a test checks the dependency list). The purpose role is
+a NOLOGIN role with `SELECT` on those seven views plus the semantic-KB metadata tables AIDB's search needs, and nothing else.
+
+Each question is **ledgered and logged as a short hash and its length, never its text**: a row in `cp_ai.ask_log` (when, who, hash, length, outcome,
+steps, rows, milliseconds; pruned after 90 days) and one log line. The limit: AIDB itself keeps the question text in its own conversation log
+(`aidb_internal.action_log`), and the hash of a short question can be guessed by trying candidates; do not put secrets in questions.
+
+**Similar past incidents.** Every window whose verdict was not operational gets a short derived text (`cp_ai.incident_text`: the dominant failure mode,
+the shares, whether a burst was active, and once known the verdict an hour later and how long it lasted; no sensor id, no attribute). The text is written
+by the engine's quarter-hour pass, only while the switch is `aidb`, and by `aidb-setup` for what already exists. An AIDB pipeline embeds it live (local
+`bge-small-en-v1.5-f16`, no key): a new or changed text is searchable seconds later with no app code. `GET /api/incidents/similar?q=...` takes a
+description, `?city=..&district=..` describes that district's current state in the same words; the answer says which backend answered and, when it fell
+back, why. A small embedding model separates incidents by their dominant failure mode ("stuck sensors" finds the stuck incident first) but only weakly by
+numbers and durations; the full-text backend is a legitimate answer for keyword-like questions.
+
+**Two privilege levels.** The app's own role stays unprivileged (no superuser, no `CREATEROLE`, and it needs no `CREATE` on schema `public` at run time).
+Everything that needs more is the operator's, once:
+
+```bash
+# the connection string of a role that can create roles and register models (not stored, not logged; it prompts when the variable is unset)
+CITYPULSE_AIDB_ADMIN_DSN=postgresql://... LLM_BASE_URL=https://gateway... LLM_API_KEY=... LLM_CHAT_MODEL=... citypulse aidb-setup
+citypulse aidb-status                      # what is requested, set up, sealed, denied; exit 1 when something is wrong (add --json)
+CITYPULSE_RETRIEVAL_BACKEND=aidb citypulse start
+```
+
+`aidb-setup` is idempotent (a repeat reports every step unchanged; tested). It refreshes the views from the code, registers the gateway chat model (a
+host-limited credential; `--model NAME` uses one you registered), the live incident pipeline, the semantic knowledge base with the joins between the views,
+the purpose and its role, the agent, enables telemetry, creates the narrow governance view, grants the runtime role exactly what it needs, backfills the
+incident texts, and **seals** every definition. The runtime role only verifies, reads status, calls `aidb.agent_converse`, retrieves, reads the action log
+of its own conversations and writes the ask ledger. `/readyz` carries an `aidb` object (state and which features are ready) and never fails the app because
+of AIDB; `GET /api/aidb` (`settings:manage`) has the detail.
+
+**Governance.** With telemetry on (`aidb.otel_client = database`, set by the operator step) AIDB records every purpose decision in `aidb_otel.traces`, whose
+rows carry the attempted SQL of every recorded call. The runtime role has **no access** to that table (setup revokes any grant and fails if one remains
+through `PUBLIC` or a membership). It reads the narrow view `cp_ai.governance_decisions_v` instead (a security-barrier view owned by the administrator:
+when, status, decision id, agent, the purpose's role, where the decision was taken, denial reason and class; no SQL text, no principal), for this app's
+agent and purpose only. `aidb-status` and `GET /api/aidb` show the denied decisions of the last day.
+
+**The seal key, and its limit.** CityPulse has no vault of its own: it stores no secret in the database and has no password unlock for one. The kit can
+only sign and check AIDB definitions with a vault's data key, so `core.vault` exists for that one purpose and nothing creates or opens it while the switch is
+`app`. Its random data key is stored **wrapped** in `app_setting` (a table the read-only AgentPG role cannot read) under the platform secret
+`CITYPULSE_ENCRYPTION_KEY` (environment, `_FILE`, or `/etc/citypulse/encryption_key`; opened at start-up) or, with sealed boot, under the unseal passphrase
+(opened by the unseal step; `aidb-setup` asks for that same passphrase when no platform secret is set). The unwrapped key lives only in the process's memory.
+The definitions that decide what data is read and which model receives it (the model and its credential's host restriction, the pipeline, the semantic
+knowledge base, the search tools AIDB registers for it, the purpose **and its role's relation grants**, the agent, and the `cp_ask` views and governance
+view) carry a MAC under it. A definition changed by a database write is reported (counter `citypulse_aidb_tampered_total{kind=...}`, a log line, `/readyz`,
+`aidb-status`) and **the AIDB paths are refused** (similarity falls back to `app`, questions answer 503) until the operator inspects it and re-runs
+`citypulse aidb-setup --reseal`; an agent, purpose or tool that nobody sealed (planted) is reported too, and so is a deleted one. If the vault is locked
+(no platform secret that opens it, or a different passphrase) the state is `vault_locked` and the features fall back; the app still starts. The limits, said
+plainly: this **detects**, it does not prevent: whoever holds the platform secret or the running process can seal anything; a member of `aidb_users` (the
+runtime role is one) can call `aidb.create_agent`/`update_agent` in AIDB 7.9, which only the seals turn into a finding; a database administrator can
+still edit a definition and the app notices at its next check (cached for 30 seconds). CityPulse has no hash-chained ledger, so unlike PayBroker a
+detection is not a ledger entry, only the counter, the log and the health report. The views are re-asserted from the code at every start by the
+migration hook; a role that can no longer create schema objects leaves them as found, and `aidb-setup` then refuses a changed one without `--reseal`
+(unless the admin connection can refresh them).
+
+**What was verified, and what was not.** Verified against AIDB 7.9.0 in Docker (`aidb-postgres:17`, own container per test run) with an unprivileged runtime
+role that owns the app's tables, **after taking `CREATE` on `public` away and handing the database to another owner**: setup and its idempotence; the purpose's
+exact grants and a refusal of every base table; verify/status/readyz with a read-only seal table; both retrieval backends and the live pipeline (a new text is
+embedded without app code); the semantic search finding the burst views by meaning; `/api/ask` end to end with the kit's scripted OpenAI-compatible model
+(`tests/aidbfake.py`) calling `semantic_kb_search` and `run_sql_query`, with answer, SQL and rows; a refused query reported and recorded as a denied decision
+in the governance view; tampering with an agent, a planted agent, a forged and a deleted seal, a rewritten view and semantic knowledge base, a missing seal
+table, and the operator's repair. Plain-Postgres tests (CI) cover the switch and its default, the views and what they leave out, the incident texts, every
+fallback, the vault paths (platform secret, passphrase, sealed boot) and the commands. **Not verified:** a real chat model (how well one follows AIDB's
+simulated tool calling and writes SQL over these views is unknown; only scripted answers ran), the llm-gateway (the tests register a plain-http stand-in with
+`aidb.allow_insecure_egress`, a gateway URL must be https), an AgentPG-hosted AIDB (no role there has the AIDB grants yet), the read-only role `a1p_readonly`
+with the `cp_ask`/`cp_ai` schemas, PostGIS together with AIDB (the image has no PostGIS: the geo features are off in those tests, behaviour unchanged), sealed
+boot together with a live AIDB, load. The native `analyze_db_health` tool of the plan is not used.
 
 ## Tests
 
 ```bash
 make lint && make test           # unit tests, no database needed
 make test-db                     # everything, against a throwaway database on the compose Postgres
+make test-aidb                   # the AIDB tests (marker `aidb`) against a throwaway aidb-postgres:17 container; see AIDB mode
 ```
 
 The suite covers validation, the simulator's behaviour under every burst, back-pressure and retry, each status

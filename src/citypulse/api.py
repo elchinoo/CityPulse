@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__,
+    aidb_features,
+    aidb_mode,
     boundaries,
     chaos,
     core,
@@ -64,6 +66,7 @@ def _announce_setup_code() -> None:
 
 
 def _startup_tasks() -> None:
+    aidb_mode.unlock_vault_at_start()      # AIDB mode only: opens the seal key with the platform secret; never raises, never blocks start-up
     try:
         with connect(retries=1) as conn:
             if local.needs_setup(conn) and not fed.enabled:
@@ -82,6 +85,7 @@ def _migrate_after_unseal(_sealed, _passphrase) -> None:
 
 
 sealed.on_unsealed(_migrate_after_unseal)
+sealed.on_unsealed(aidb_mode.sealed_unlocker)       # AIDB mode only, never raises: the unseal passphrase opens the seal key of the AIDB definitions
 
 
 @contextlib.asynccontextmanager
@@ -153,7 +157,8 @@ def readyz():
         with connect(retries=1) as conn:
             conn.execute("SELECT 1")
         # masking: report only (last re-assert, tables found open before it); drift never makes the app unready
-        return {"status": "ready", "masking": masking.status()}
+        # aidb: where AIDB mode is on, its state (ready, unavailable, vault_locked, tampered, error); it never makes the app unready
+        return {"status": "ready", "masking": masking.status(), "aidb": aidb_mode.readyz(connect)}
     except Exception:  # noqa: BLE001 - database may be waking; never echo connection details
         return JSONResponse({"status": "waking-database"}, status_code=503)
 
@@ -730,6 +735,61 @@ def call_tool(name: str, body: ToolCall):
         raise HTTPException(422, str(exc)) from exc
     except explain.NoSuchDistrict as exc:
         raise HTTPException(404, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+# --- AIDB mode (CITYPULSE_RETRIEVAL_BACKEND=aidb; README, "AIDB mode") ---------------------------------------------------------
+
+class AskBody(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
+    conversation_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
+
+
+@app.post("/api/ask")
+def ask(body: AskBody, principal=Depends(require("city:ask"))):
+    """A question in natural language, answered by an AIDB agent over read-only views (no raw readings): the answer, the SQL it ran and the rows.
+    503 while AIDB mode is off, not set up, locked or tampered; the question is ledgered as a short hash and its length, never its text."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            return aidb_features.ask(conn, body.question, principal.actor, body.conversation_id)
+    except aidb_features.AskRefused as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/incidents/similar", dependencies=[Depends(require("city:read"))])
+def similar_incidents(city: str | None = CityParam, district: str | None = Query(None, max_length=24, pattern=DISTRICT_ID.pattern),
+                      q: str | None = Query(None, min_length=3, max_length=400), k: int = Query(5, ge=1, le=memory.SIMILAR_MAX)):
+    """Past incidents like a district's current state (`city` and `district`) or like a description (`q`), by the meaning of their incident
+    texts: PostgreSQL full-text search by default, an AIDB knowledge base with CITYPULSE_RETRIEVAL_BACKEND=aidb (the answer says which and why)."""
+    _api_role()
+    if not q and not (city and district):
+        raise HTTPException(422, "give q (a description) or city and district")
+    try:
+        with connect(retries=1) as conn:
+            out = aidb_features.similar_incidents(conn, city=city, district=district, q=q, k=k)
+            conn.commit()
+            return out
+    except aidb_features.NoSuchDistrict as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (psycopg.Error, RuntimeError) as exc:
+        raise _db_unavailable() from exc
+
+
+@app.get("/api/aidb", dependencies=[Depends(require("settings:manage"))])
+def aidb_state():
+    """AIDB mode for an administrator: what is requested, what is set up, what fails its seal, and the denied purpose decisions of the last day
+    (from a narrow view, never from aidb_otel.traces)."""
+    _api_role()
+    try:
+        with connect(retries=1) as conn:
+            s = aidb_mode.state(conn, fresh=True)
+            s = {**s, "governance": aidb_mode.recent_decisions(conn) if s.get("aidb", {}).get("available") else {"available": False}}
+            conn.rollback()
+            return s
     except (psycopg.Error, RuntimeError) as exc:
         raise _db_unavailable() from exc
 

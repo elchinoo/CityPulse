@@ -301,6 +301,8 @@ def tick(conn, now: datetime | None = None) -> dict:
             _state["window"] = boundary
             out["scheduled"] = record(conn, boundary, "schedule")
             out["labelled"] = label(conn)
+            from . import aidb_features
+            aidb_features.touch(conn)          # incident texts for the similarity pipeline: a no-op unless CITYPULSE_RETRIEVAL_BACKEND=aidb
         conn.commit()
     except psycopg.Error as exc:
         conn.rollback()
