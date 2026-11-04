@@ -270,7 +270,7 @@ def ensure(conn) -> dict:
             conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
         except psycopg.Error as exc:
             reason = f"{NO_POSTGIS}: {str(exc).splitlines()[0][:120]}"
-            log.info("geography skipped: %s", reason)
+            log.warning("geo features disabled: %s", reason)
             return {"available": False, "reason": reason, "areas": 0}
         try:
             for stmt in SCHEMA:

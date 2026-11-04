@@ -33,6 +33,7 @@ from . import (
     hardening,
     memory,
     metrics,
+    migrate,
     otlp,
     purge,
     reporter,
@@ -72,6 +73,15 @@ def _startup_tasks() -> None:
 
 
 sealed = sealing.Sealed.from_env()
+
+
+def _migrate_after_unseal(_sealed, _passphrase) -> None:
+    """Sealed boot: `citypulse start` could not migrate (no database URL until the operator unseals), so the schema is created here,
+    before the app serves. Never runs without a blob; there `citypulse start` migrates as before."""
+    migrate.run()
+
+
+sealed.on_unsealed(_migrate_after_unseal)
 
 
 @contextlib.asynccontextmanager

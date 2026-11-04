@@ -43,7 +43,10 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "start":
         # The simulator-only role has no schema of its own to create, but migrating is idempotent and safe.
         _check_sim()
-        migrate.run()
+        from apgkit.sealed import Sealed
+
+        if not Sealed.from_env().enabled:      # sealed boot: no database URL until the operator unseals; the unseal callback migrates
+            migrate.run()
         _serve()
     elif args.cmd == "seed-history":
         migrate.run()

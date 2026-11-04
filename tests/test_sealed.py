@@ -15,6 +15,8 @@ PASS = "correct-horse-battery-staple-9"
 def sealed_app(monkeypatch):
     blob = sealing.seal({"DATABASE_URL": "postgresql://u:p@127.0.0.1:1/none", "CITYPULSE_INGEST_TOKEN": "t" * 40}, PASS)
     monkeypatch.setenv("APGKIT_SEALED", blob)
+    from citypulse import migrate
+    monkeypatch.setattr(migrate, "run", lambda: [])    # the unseal step migrates; this test has no database (see test_sealed_boot.py)
     app_module = importlib.reload(api)          # the sealed state is read when the module is imported
     yield app_module
     monkeypatch.delenv("APGKIT_SEALED")
